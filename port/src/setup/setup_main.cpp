@@ -7,8 +7,8 @@
 //   - TU3's data100.bin (expanded) + data100.ofs into game\update (the game's "update:" device);
 //   - game\tekken.img: the disc's Default.xex with TU3's Default.xexp applied, decrypted - checked
 //     against the SHA-1 of the image the port's executable was recompiled from.
-// The only files carried inside this executable are ours (the port's exe, the Steamworks client
-// library, the VC++ runtime, a readme) and an original icon.
+// The only files carried inside this executable are ours (the port's exe, optional Steamworks
+// client library, the VC++ runtime, a readme) and an original icon.
 //
 // Install layout:
 //     <Program Files>\Tekken Tag Tournament 2\        exe + runtime + game\ (read-only)
@@ -26,6 +26,8 @@
 #include <shobjidl.h>
 #include <shellapi.h>
 #include <objbase.h>
+#include <dwmapi.h>
+#include <uxtheme.h>
 #include <cwctype>
 
 #include <algorithm>
@@ -44,10 +46,10 @@ using namespace ttt2::setup;
 #define WM_APP_PROGRESS (WM_APP + 1)
 #define WM_APP_DONE     (WM_APP + 2)
 
-static const wchar_t kAppName[]      = L"Tekken Tag Tournament 2 (PC port)";
-static const wchar_t kFolderName[]   = L"Tekken Tag Tournament 2";
+static const wchar_t kAppName[]      = L"TTT2 Community Edition by Sheeda Musalli";
+static const wchar_t kFolderName[]   = L"TTT2 Community Edition";
 static const wchar_t kRegKey[]       = L"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\TTT2Recomp";
-static const wchar_t kShortcut[]     = L"Tekken Tag Tournament 2.lnk";
+static const wchar_t kShortcut[]     = L"TTT2 Community Edition.lnk";
 static const wchar_t kUninstallExe[] = L"uninstall.exe";
 static const wchar_t kUserDataDir[]  = L"TTT2Recomp";      // under %LOCALAPPDATA%
 static const wchar_t kImageName[]    = L"game\\tekken.img";
@@ -114,11 +116,11 @@ static void UnLog(const wchar_t* fmt, ...);
 
 // Is this folder one of our installs? The uninstaller deletes a whole tree, so it never takes a
 // path on trust - not from its own location, and not from a registry value. Markers that never
-// change: the game image the installer built and the Steamworks library beside the exe.
+// change: the game image the installer built and the port executable beside it.
 static bool LooksLikeInstall(const std::wstring& dir) {
     if (dir.size() < 4) return false;
     return GetFileAttributesW((dir + L"\\" + kImageName).c_str()) != INVALID_FILE_ATTRIBUTES &&
-           GetFileAttributesW((dir + L"\\steam_api64.dll").c_str()) != INVALID_FILE_ATTRIBUTES;
+           GetFileAttributesW((dir + L"\\" + kGameExeName).c_str()) != INVALID_FILE_ATTRIBUTES;
 }
 
 static void DeleteTree(const std::wstring& dir) {
@@ -168,7 +170,7 @@ static bool MakeShortcut(const std::wstring& lnkPath, const std::wstring& target
     bool ok = false;
     link->SetPath(target.c_str());
     link->SetWorkingDirectory(workDir.c_str());
-    link->SetDescription(L"Tekken Tag Tournament 2 (PC port)");
+    link->SetDescription(L"TTT2 Community Edition by Sheeda Musalli");
     if (!iconPath.empty()) link->SetIconLocation(iconPath.c_str(), 0);
     IPersistFile* pf = nullptr;
     if (SUCCEEDED(link->QueryInterface(IID_IPersistFile, (void**)&pf))) {
@@ -375,14 +377,15 @@ static bool RunInstall(InstallJob* job) {
     const std::wstring uninst = job->dest + L"\\" + kUninstallExe;
     CopyFileW(self, uninst.c_str(), FALSE);
     const std::wstring game = job->dest + L"\\" + kGameExeName;
+    const std::wstring launcher = job->dest + L"\\" + kLauncherExeName;
     if (job->scDesktop) {
         std::wstring d = KnownDir(FOLDERID_Desktop);
-        if (!d.empty()) MakeShortcut(d + L"\\" + kShortcut, game, job->dest, game);
+        if (!d.empty()) MakeShortcut(d + L"\\" + kShortcut, launcher, job->dest, launcher);
     }
     if (job->scStartMenu) {
         std::wstring s = KnownDir(FOLDERID_CommonPrograms);
         if (s.empty()) s = KnownDir(FOLDERID_Programs);
-        if (!s.empty()) MakeShortcut(s + L"\\" + kShortcut, game, job->dest, game);
+        if (!s.empty()) MakeShortcut(s + L"\\" + kShortcut, launcher, job->dest, launcher);
     }
 
     job->Set(99, L"Registering with Add or remove programs\x2026");
@@ -394,7 +397,7 @@ static bool RunInstall(InstallJob* job) {
         auto D = [&](const wchar_t* n, DWORD v) { RegSetValueExW(k, n, 0, REG_DWORD, (const BYTE*)&v, sizeof v); };
         S(L"DisplayName", kAppName);
         S(L"DisplayVersion", TTT2_VERSION_W);
-        S(L"Publisher", L"Native PC port");
+        S(L"Publisher", L"Sheeda Musalli");
         S(L"InstallLocation", job->dest);
         S(L"DisplayIcon", game);
         S(L"UninstallString", L"\"" + uninst + L"\" /uninstall");
@@ -480,6 +483,189 @@ static std::wstring PickFolder(HWND owner) {
 static InstallJob g_job;
 static HANDLE     g_thread = nullptr;
 static bool       g_running = false;
+static bool       g_desktopShortcut = true;
+static bool       g_startMenuShortcut = true;
+static bool       g_removeUserData = false;
+
+// Match the launcher's dark metallic surfaces, Tekken red/blue accents, and Segoe UI typography.
+static const COLORREF kBodyColor = RGB(16, 21, 28);
+static const COLORREF kHeaderColor = RGB(19, 26, 35);
+static const COLORREF kAccentColor = RGB(218, 47, 60);
+static const COLORREF kBlueColor = RGB(53, 158, 207);
+static const COLORREF kTextColor = RGB(233, 240, 247);
+static const COLORREF kMutedColor = RGB(145, 163, 181);
+static const COLORREF kFieldColor = RGB(27, 36, 47);
+static HBRUSH g_bodyBrush = nullptr;
+static HBRUSH g_headerBrush = nullptr;
+static HBRUSH g_fieldBrush = nullptr;
+static HBRUSH g_accentBrush = nullptr;
+static HBRUSH g_edgeBrush = nullptr;
+static HFONT g_brandFont = nullptr;
+static HFONT g_titleFont = nullptr;
+static HFONT g_sectionFont = nullptr;
+static HFONT g_captionFont = nullptr;
+
+static void UseDarkTitleBar(HWND hwnd) {
+    const BOOL enabled = TRUE;
+    DwmSetWindowAttribute(hwnd, 20, &enabled, sizeof(enabled));
+    DwmSetWindowAttribute(hwnd, 19, &enabled, sizeof(enabled));
+}
+
+static LRESULT CALLBACK DarkEditSubclass(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
+                                         UINT_PTR subclassId, DWORD_PTR reference) {
+    if (msg == WM_NCPAINT) return 0;
+    if (msg == WM_PAINT) {
+        const LRESULT result = DefSubclassProc(hwnd, msg, wp, lp);
+        HDC dc = GetDC(hwnd);
+        if (dc) {
+            RECT r{}; GetClientRect(hwnd, &r);
+            HPEN edge = CreatePen(PS_SOLID, 1, RGB(43, 56, 70));
+            HGDIOBJ oldPen = SelectObject(dc, edge);
+            HGDIOBJ oldBrush = SelectObject(dc, GetStockObject(NULL_BRUSH));
+            Rectangle(dc, r.left, r.top, r.right, r.bottom);
+            SelectObject(dc, oldBrush); SelectObject(dc, oldPen); DeleteObject(edge);
+            ReleaseDC(hwnd, dc);
+        }
+        return result;
+    }
+    if (msg == WM_NCDESTROY) RemoveWindowSubclass(hwnd, DarkEditSubclass, subclassId);
+    return DefSubclassProc(hwnd, msg, wp, lp);
+}
+
+static void EnsureBrandTheme() {
+    if (!g_bodyBrush) g_bodyBrush = CreateSolidBrush(kBodyColor);
+    if (!g_headerBrush) g_headerBrush = CreateSolidBrush(kHeaderColor);
+    if (!g_fieldBrush) g_fieldBrush = CreateSolidBrush(kFieldColor);
+    if (!g_accentBrush) g_accentBrush = CreateSolidBrush(kAccentColor);
+    if (!g_edgeBrush) g_edgeBrush = CreateSolidBrush(RGB(43, 56, 70));
+}
+
+static void ApplyBrandFonts(HWND dlg, bool uninstall) {
+    if (!g_brandFont) g_brandFont = CreateFontW(-17, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI Variable Display");
+    if (!g_titleFont) g_titleFont = CreateFontW(-25, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI Variable Display");
+    if (!g_sectionFont) g_sectionFont = CreateFontW(-12, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+    if (!g_captionFont) g_captionFont = CreateFontW(-12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+
+    const int largeIds[] = { uninstall ? IDC_UN_BRAND : IDC_BRAND,
+                             uninstall ? IDC_UN_TITLE : IDC_INSTALL_TITLE };
+    SendDlgItemMessageW(dlg, largeIds[0], WM_SETFONT, (WPARAM)g_brandFont, TRUE);
+    SendDlgItemMessageW(dlg, largeIds[1], WM_SETFONT, (WPARAM)g_titleFont, TRUE);
+    if (!uninstall) {
+        SendDlgItemMessageW(dlg, IDC_HEADER_TITLE, WM_SETFONT, (WPARAM)g_brandFont, TRUE);
+        SendDlgItemMessageW(dlg, IDC_BRAND_TAG, WM_SETFONT, (WPARAM)g_captionFont, TRUE);
+        SendDlgItemMessageW(dlg, IDC_HEADER_SUBTITLE, WM_SETFONT, (WPARAM)g_captionFont, TRUE);
+        for (int id : { IDC_SOURCE_BADGE, IDC_UPDATE_BADGE, IDC_DEST_BADGE })
+            SendDlgItemMessageW(dlg, id, WM_SETFONT, (WPARAM)g_sectionFont, TRUE);
+        SendDlgItemMessageW(dlg, IDC_FOOTER, WM_SETFONT, (WPARAM)g_captionFont, TRUE);
+        for (int id : { IDC_ISO_BROWSE, IDC_TU_BROWSE, IDC_DEST_BROWSE, IDC_INSTALL, IDCANCEL,
+                        IDC_SC_DESKTOP, IDC_SC_STARTMENU, IDC_STATUS })
+            SendDlgItemMessageW(dlg, id, WM_SETFONT, (WPARAM)g_captionFont, TRUE);
+    } else {
+        for (int id : { IDOK, IDCANCEL, IDC_UN_KEEPSAVES })
+            SendDlgItemMessageW(dlg, id, WM_SETFONT, (WPARAM)g_captionFont, TRUE);
+    }
+}
+
+static bool IsHeaderControl(int id, bool uninstall) {
+    if (uninstall) return id == IDC_UN_BRAND || id == IDC_UN_TITLE;
+    return id == IDC_BRAND || id == IDC_BRAND_TAG || id == IDC_HEADER_TITLE || id == IDC_HEADER_SUBTITLE;
+}
+
+static void PaintDialogBackground(HWND dlg, HDC dc, bool uninstall) {
+    RECT client{};
+    GetClientRect(dlg, &client);
+    FillRect(dc, &client, g_bodyBrush);
+    RECT header = client;
+    // Dialog template coordinates are in dialog units; WM_ERASEBKGND uses physical pixels.
+    header.bottom = uninstall ? 86 : 84;
+    FillRect(dc, &header, g_headerBrush);
+    RECT accent = header;
+    accent.left = 0;
+    accent.top = header.bottom - 2;
+    FillRect(dc, &accent, g_accentBrush);
+    RECT blueTag{ header.right - 150, accent.top, header.right, header.bottom };
+    HBRUSH blue = CreateSolidBrush(kBlueColor);
+    FillRect(dc, &blueTag, blue);
+    DeleteObject(blue);
+}
+
+static INT_PTR PaintStaticColor(HDC dc, HWND control, bool uninstall) {
+    const int id = GetDlgCtrlID(control);
+    SetBkMode(dc, TRANSPARENT);
+    if (IsHeaderControl(id, uninstall)) {
+        SetTextColor(dc, (id == IDC_BRAND || id == IDC_UN_BRAND) ? kAccentColor : RGB(250, 252, 255));
+        return (INT_PTR)g_headerBrush;
+    }
+    if (id == IDC_SOURCE_BADGE || id == IDC_UPDATE_BADGE || id == IDC_DEST_BADGE) {
+        SetTextColor(dc, kAccentColor);
+    } else if (id == IDC_BRAND_TAG || id == IDC_HEADER_SUBTITLE) {
+        SetTextColor(dc, kMutedColor);
+    } else if (id == IDC_FOOTER) {
+        SetTextColor(dc, kMutedColor);
+    } else {
+        SetTextColor(dc, kTextColor);
+    }
+    return (INT_PTR)g_bodyBrush;
+}
+
+static void DrawBrandButton(const DRAWITEMSTRUCT* draw) {
+    const bool isCheck = draw->CtlID == IDC_SC_DESKTOP || draw->CtlID == IDC_SC_STARTMENU || draw->CtlID == IDC_UN_KEEPSAVES;
+    if (isCheck) {
+        FillRect(draw->hDC, &draw->rcItem, g_bodyBrush);
+        RECT box{ draw->rcItem.left, draw->rcItem.top + 1, draw->rcItem.left + 15, draw->rcItem.top + 16 };
+        const bool checked = draw->CtlID == IDC_SC_DESKTOP ? g_desktopShortcut :
+            draw->CtlID == IDC_SC_STARTMENU ? g_startMenuShortcut : g_removeUserData;
+        HBRUSH fill = CreateSolidBrush(checked ? kAccentColor : kFieldColor);
+        FillRect(draw->hDC, &box, fill);
+        DeleteObject(fill);
+        FrameRect(draw->hDC, &box, g_edgeBrush);
+        if (checked) {
+            HPEN tick = CreatePen(PS_SOLID, 2, kTextColor);
+            HGDIOBJ old = SelectObject(draw->hDC, tick);
+            MoveToEx(draw->hDC, box.left + 3, box.top + 8, nullptr);
+            LineTo(draw->hDC, box.left + 6, box.top + 11);
+            LineTo(draw->hDC, box.left + 12, box.top + 4);
+            SelectObject(draw->hDC, old);
+            DeleteObject(tick);
+        }
+        SetBkMode(draw->hDC, TRANSPARENT);
+        SetTextColor(draw->hDC, (draw->itemState & ODS_DISABLED) ? kMutedColor : kTextColor);
+        RECT text = draw->rcItem;
+        text.left += 23;
+        wchar_t label[128] = {};
+        GetWindowTextW(draw->hwndItem, label, (int)(sizeof(label) / sizeof(label[0])));
+        DrawTextW(draw->hDC, label, -1, &text, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        return;
+    }
+    const bool primary = draw->CtlID == IDC_INSTALL || draw->CtlID == IDOK;
+    const bool pressed = (draw->itemState & ODS_SELECTED) != 0;
+    const bool disabled = (draw->itemState & ODS_DISABLED) != 0;
+    const COLORREF fill = primary
+        ? (pressed ? RGB(170, 32, 44) : kAccentColor)
+        : (pressed ? RGB(38, 50, 64) : kFieldColor);
+    HBRUSH brush = CreateSolidBrush(fill);
+    HPEN pen = CreatePen(PS_SOLID, 1, primary ? kAccentColor : RGB(43, 56, 70));
+    HGDIOBJ oldPen = SelectObject(draw->hDC, pen);
+    HGDIOBJ oldBrush = SelectObject(draw->hDC, brush);
+    RoundRect(draw->hDC, draw->rcItem.left, draw->rcItem.top, draw->rcItem.right, draw->rcItem.bottom,
+              primary ? 10 : 7, primary ? 10 : 7);
+    SelectObject(draw->hDC, oldBrush); SelectObject(draw->hDC, oldPen); DeleteObject(pen);
+    DeleteObject(brush);
+    SetBkMode(draw->hDC, TRANSPARENT);
+    SetTextColor(draw->hDC, disabled ? kMutedColor : (primary ? kBodyColor : kTextColor));
+    wchar_t label[80] = {};
+    GetWindowTextW(draw->hwndItem, label, (int)(sizeof(label) / sizeof(label[0])));
+    RECT text = draw->rcItem;
+    DrawTextW(draw->hDC, label, -1, &text, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    if (draw->itemState & ODS_FOCUS) {
+        InflateRect(&text, -4, -3);
+        DrawFocusRect(draw->hDC, &text);
+    }
+}
 
 static void SetControlsEnabled(HWND dlg, bool on) {
     for (int id : { IDC_ISO_PATH, IDC_ISO_BROWSE, IDC_TU_PATH, IDC_TU_BROWSE, IDC_DEST_PATH, IDC_DEST_BROWSE,
@@ -487,21 +673,56 @@ static void SetControlsEnabled(HWND dlg, bool on) {
         EnableWindow(GetDlgItem(dlg, id), on);
 }
 
-static INT_PTR CALLBACK MainProc(HWND dlg, UINT msg, WPARAM wp, LPARAM) {
+static INT_PTR CALLBACK MainProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_INITDIALOG: {
+        EnsureBrandTheme();
+        UseDarkTitleBar(dlg);
         HICON icon = LoadIconW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDI_TTT2SETUP));
         SendMessageW(dlg, WM_SETICON, ICON_BIG, (LPARAM)icon);
         SendMessageW(dlg, WM_SETICON, ICON_SMALL, (LPARAM)icon);
-        CheckDlgButton(dlg, IDC_SC_DESKTOP, BST_CHECKED);
-        CheckDlgButton(dlg, IDC_SC_STARTMENU, BST_CHECKED);
+        ApplyBrandFonts(dlg, false);
+        g_desktopShortcut = true;
+        g_startMenuShortcut = true;
         std::wstring pf = KnownDir(FOLDERID_ProgramFiles);
         SetDlgItemTextW(dlg, IDC_DEST_PATH, (pf + L"\\" + kFolderName).c_str());
         SendDlgItemMessageW(dlg, IDC_PROGRESS, PBM_SETRANGE32, 0, 100);
+        SendDlgItemMessageW(dlg, IDC_PROGRESS, PBM_SETBARCOLOR, 0, (LPARAM)kAccentColor);
+        SendDlgItemMessageW(dlg, IDC_PROGRESS, PBM_SETBKCOLOR, 0, (LPARAM)kFieldColor);
+        for (int id : { IDC_ISO_PATH, IDC_TU_PATH, IDC_DEST_PATH }) {
+            HWND edit = GetDlgItem(dlg, id);
+            SetWindowTheme(edit, L"DarkMode_Explorer", nullptr);
+            const LONG_PTR style = GetWindowLongPtrW(edit, GWL_STYLE);
+            SetWindowLongPtrW(edit, GWL_STYLE, style & ~static_cast<LONG_PTR>(WS_BORDER));
+            const LONG_PTR exStyle = GetWindowLongPtrW(edit, GWL_EXSTYLE);
+            SetWindowLongPtrW(edit, GWL_EXSTYLE, exStyle & ~static_cast<LONG_PTR>(WS_EX_CLIENTEDGE));
+            SetWindowPos(edit, nullptr, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+            SetWindowSubclass(edit, DarkEditSubclass, (UINT_PTR)id, 0);
+        }
+        SetWindowTheme(GetDlgItem(dlg, IDC_PROGRESS), L"", L"");
         return TRUE;
     }
+    case WM_ERASEBKGND:
+        PaintDialogBackground(dlg, (HDC)wp, false);
+        return TRUE;
+    case WM_CTLCOLORSTATIC:
+        return PaintStaticColor((HDC)wp, (HWND)lp, false);
+    case WM_CTLCOLOREDIT:
+        SetTextColor((HDC)wp, kTextColor);
+        SetBkColor((HDC)wp, kFieldColor);
+        return (INT_PTR)g_fieldBrush;
+    case WM_CTLCOLORBTN:
+        SetTextColor((HDC)wp, kTextColor);
+        SetBkColor((HDC)wp, kBodyColor);
+        return (INT_PTR)g_bodyBrush;
+    case WM_DRAWITEM:
+        DrawBrandButton((const DRAWITEMSTRUCT*)lp);
+        return TRUE;
     case WM_COMMAND:
         switch (LOWORD(wp)) {
+        case IDC_SC_DESKTOP: g_desktopShortcut = !g_desktopShortcut; InvalidateRect(GetDlgItem(dlg, IDC_SC_DESKTOP), nullptr, TRUE); return TRUE;
+        case IDC_SC_STARTMENU: g_startMenuShortcut = !g_startMenuShortcut; InvalidateRect(GetDlgItem(dlg, IDC_SC_STARTMENU), nullptr, TRUE); return TRUE;
         case IDC_ISO_BROWSE: {
             const COMDLG_FILTERSPEC f[] = { { L"Xbox 360 disc image (*.iso)", L"*.iso" }, { L"All files", L"*.*" } };
             std::wstring p = PickFile(dlg, L"Choose your Tekken Tag Tournament 2 disc image", f, 2);
@@ -533,7 +754,7 @@ static INT_PTR CALLBACK MainProc(HWND dlg, UINT msg, WPARAM wp, LPARAM) {
                 return TRUE;
             }
             if (!dest[0] || wcslen(dest) < 3 || dest[1] != L':') {
-                MessageBoxW(dlg, L"Choose a full path to install to, for example C:\\Program Files\\Tekken Tag Tournament 2.",
+            MessageBoxW(dlg, L"Choose a full path to install to, for example C:\\Program Files\\TTT2 Community Edition.",
                             kAppName, MB_ICONINFORMATION);
                 return TRUE;
             }
@@ -542,8 +763,8 @@ static INT_PTR CALLBACK MainProc(HWND dlg, UINT msg, WPARAM wp, LPARAM) {
             g_job.iso = iso;
             g_job.tu = tu;
             g_job.dest = dest;
-            g_job.scDesktop = IsDlgButtonChecked(dlg, IDC_SC_DESKTOP) == BST_CHECKED;
-            g_job.scStartMenu = IsDlgButtonChecked(dlg, IDC_SC_STARTMENU) == BST_CHECKED;
+            g_job.scDesktop = g_desktopShortcut;
+            g_job.scStartMenu = g_startMenuShortcut;
             g_job.cancel = 0;
             SetControlsEnabled(dlg, false);
             g_running = true;
@@ -580,8 +801,8 @@ static INT_PTR CALLBACK MainProc(HWND dlg, UINT msg, WPARAM wp, LPARAM) {
                 L" is installed.\n\nSaved games, profiles and settings are kept in your user profile, so they "
                 L"survive an uninstall.\n\nPlay now?";
             if (MessageBoxW(dlg, msg.c_str(), kAppName, MB_YESNO | MB_ICONINFORMATION) == IDYES) {
-                std::wstring game = g_job.dest + L"\\" + kGameExeName;
-                ShellExecuteW(nullptr, L"open", game.c_str(), nullptr, g_job.dest.c_str(), SW_SHOWNORMAL);
+                std::wstring launcher = g_job.dest + L"\\" + kLauncherExeName;
+                ShellExecuteW(nullptr, L"open", launcher.c_str(), nullptr, g_job.dest.c_str(), SW_SHOWNORMAL);
             }
             EndDialog(dlg, 1);
         } else {
@@ -596,6 +817,11 @@ static INT_PTR CALLBACK MainProc(HWND dlg, UINT msg, WPARAM wp, LPARAM) {
 
     case WM_CLOSE:
         if (!g_running) EndDialog(dlg, 0);
+        return TRUE;
+    case WM_DESTROY:
+        for (HFONT font : { g_brandFont, g_titleFont, g_sectionFont, g_captionFont })
+            if (font) { DeleteObject(font); }
+        g_brandFont = g_titleFont = g_sectionFont = g_captionFont = nullptr;
         return TRUE;
     }
     return FALSE;
@@ -673,19 +899,41 @@ static void DoUninstall(HWND dlg) {
     }
 }
 
-static INT_PTR CALLBACK UninstallProc(HWND dlg, UINT msg, WPARAM wp, LPARAM) {
+static INT_PTR CALLBACK UninstallProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_INITDIALOG: {
+        EnsureBrandTheme();
+        UseDarkTitleBar(dlg);
         SendMessageW(dlg, WM_SETICON, ICON_BIG, (LPARAM)LoadIconW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDI_TTT2SETUP)));
+        ApplyBrandFonts(dlg, true);
         std::wstring t = std::wstring(kAppName) + L" will be removed from:\n" + g_un.dir +
                          L"\n\nYour saved games and profiles are kept unless you tick the box below.";
         SetDlgItemTextW(dlg, IDC_UN_TEXT, t.c_str());
+        g_removeUserData = false;
         SendDlgItemMessageW(dlg, IDC_PROGRESS, PBM_SETRANGE32, 0, 100);
+        SetWindowTheme(GetDlgItem(dlg, IDC_PROGRESS), L"", L"");
         return TRUE;
     }
+    case WM_ERASEBKGND:
+        PaintDialogBackground(dlg, (HDC)wp, true);
+        return TRUE;
+    case WM_CTLCOLORSTATIC:
+        return PaintStaticColor((HDC)wp, (HWND)lp, true);
+    case WM_CTLCOLOREDIT:
+        SetTextColor((HDC)wp, kTextColor);
+        SetBkColor((HDC)wp, kFieldColor);
+        return (INT_PTR)g_fieldBrush;
+    case WM_CTLCOLORBTN:
+        SetTextColor((HDC)wp, kTextColor);
+        SetBkColor((HDC)wp, kBodyColor);
+        return (INT_PTR)g_bodyBrush;
+    case WM_DRAWITEM:
+        DrawBrandButton((const DRAWITEMSTRUCT*)lp);
+        return TRUE;
     case WM_COMMAND:
+        if (LOWORD(wp) == IDC_UN_KEEPSAVES) { g_removeUserData = !g_removeUserData; InvalidateRect(GetDlgItem(dlg, IDC_UN_KEEPSAVES), nullptr, TRUE); return TRUE; }
         if (LOWORD(wp) == IDOK) {
-            g_un.alsoSaves = IsDlgButtonChecked(dlg, IDC_UN_KEEPSAVES) == BST_CHECKED;
+            g_un.alsoSaves = g_removeUserData;
             if (g_un.alsoSaves &&
                 MessageBoxW(dlg, L"Your saved games, profiles and settings will be permanently deleted. Continue?",
                             kAppName, MB_YESNO | MB_ICONWARNING) != IDYES)
@@ -700,6 +948,11 @@ static INT_PTR CALLBACK UninstallProc(HWND dlg, UINT msg, WPARAM wp, LPARAM) {
         return FALSE;
     case WM_CLOSE:
         EndDialog(dlg, 0);
+        return TRUE;
+    case WM_DESTROY:
+        for (HFONT font : { g_brandFont, g_titleFont, g_sectionFont, g_captionFont })
+            if (font) DeleteObject(font);
+        g_brandFont = g_titleFont = g_sectionFont = g_captionFont = nullptr;
         return TRUE;
     }
     return FALSE;

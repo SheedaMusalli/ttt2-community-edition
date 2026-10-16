@@ -7,50 +7,66 @@ IDI_TTT2SETUP          ICON    "@TTT2_SETUP_ICON@"
 1                      24      "@TTT2_SETUP_MANIFEST@"
 
 IDR_GAME_EXE           RCDATA  "@TTT2_GAME_EXE@"
-IDR_STEAM_API          RCDATA  "@TTT2_STEAM_DLL@"
+IDR_LAUNCHER_EXE       RCDATA  "@TTT2_LAUNCHER_EXE@"
+@TTT2_STEAM_RESOURCE_LINE@
 IDR_MSVCP140           RCDATA  "@CRT_MSVCP140@"
 IDR_MSVCP140_ATOMIC    RCDATA  "@CRT_MSVCP140_ATOMIC@"
 IDR_VCRUNTIME140       RCDATA  "@CRT_VCRUNTIME140@"
 IDR_VCRUNTIME140_1     RCDATA  "@CRT_VCRUNTIME140_1@"
 IDR_README             RCDATA  "@TTT2_README_TXT@"
 
-IDD_MAIN DIALOGEX 0, 0, 320, 250
+IDD_MAIN DIALOGEX 0, 0, 640, 440
 STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
-CAPTION "Install Tekken Tag Tournament 2 (PC port)"
+CAPTION "TTT2 Community Edition | Sheeda Musalli"
 FONT 9, "Segoe UI", 400, 0, 0x1
 BEGIN
-    LTEXT           "This installs the PC port. It contains no game data: choose your own Xbox 360 disc image and Title Update 3, and the game files are made from them (about 13 GB).",
-                    IDC_INTRO, 10, 8, 300, 26
-    LTEXT           "Disc image (.iso):", IDC_ISO_LABEL, 10, 40, 120, 9
-    EDITTEXT        IDC_ISO_PATH, 10, 52, 240, 14, ES_AUTOHSCROLL
-    PUSHBUTTON      "Browse...", IDC_ISO_BROWSE, 256, 51, 54, 16
-    LTEXT           "Title Update 3 (file TU_..._O2, or the folder holding it):", IDC_TU_LABEL, 10, 74, 300, 9
-    EDITTEXT        IDC_TU_PATH, 10, 86, 240, 14, ES_AUTOHSCROLL
-    PUSHBUTTON      "Browse...", IDC_TU_BROWSE, 256, 85, 54, 16
-    LTEXT           "Install to:", IDC_DEST_LABEL, 10, 108, 120, 9
-    EDITTEXT        IDC_DEST_PATH, 10, 120, 240, 14, ES_AUTOHSCROLL
-    PUSHBUTTON      "Browse...", IDC_DEST_BROWSE, 256, 119, 54, 16
+    ICON            IDI_TTT2SETUP, IDC_BRAND_ICON, 22, 10, 34, 34
+    LTEXT           "SHEEDA MUSALLI", IDC_BRAND, 66, 10, 210, 20
+    LTEXT           "COMMUNITY EDITION", IDC_BRAND_TAG, 67, 30, 190, 14
+    LTEXT           "TEKKEN TAG TOURNAMENT 2", IDC_HEADER_TITLE, 340, 10, 280, 23
+    LTEXT           "INSTALLER  /  VERSION @TTT2_VERSION@", IDC_HEADER_SUBTITLE, 342, 34, 270, 14
+
+    LTEXT           "Set up your game", IDC_INSTALL_TITLE, 24, 66, 590, 28
+    LTEXT           "Select your legally obtained disc image and Title Update 3. TTT2 files and the launcher are installed together (about 13 GB).",
+                    IDC_INSTALL_NOTE, 24, 96, 590, 30
+
+    LTEXT           "01  /  DISC IMAGE (.ISO)", IDC_SOURCE_BADGE, 24, 137, 570, 14
+    EDITTEXT        IDC_ISO_PATH, 24, 155, 500, 24, ES_AUTOHSCROLL
+    PUSHBUTTON      "Browse...", IDC_ISO_BROWSE, 536, 154, 78, 26, BS_OWNERDRAW | WS_TABSTOP
+
+    LTEXT           "02  /  TITLE UPDATE 3", IDC_UPDATE_BADGE, 24, 196, 570, 14
+    EDITTEXT        IDC_TU_PATH, 24, 214, 500, 24, ES_AUTOHSCROLL
+    PUSHBUTTON      "Browse...", IDC_TU_BROWSE, 536, 213, 78, 26, BS_OWNERDRAW | WS_TABSTOP
+
+    LTEXT           "03  /  INSTALL LOCATION", IDC_DEST_BADGE, 24, 255, 570, 14
+    EDITTEXT        IDC_DEST_PATH, 24, 273, 500, 24, ES_AUTOHSCROLL
+    PUSHBUTTON      "Browse...", IDC_DEST_BROWSE, 536, 272, 78, 26, BS_OWNERDRAW | WS_TABSTOP
+
     CONTROL         "Create a &Desktop shortcut", IDC_SC_DESKTOP, "Button",
-                    BS_AUTOCHECKBOX | WS_TABSTOP, 10, 144, 140, 10
+                    BS_OWNERDRAW | WS_TABSTOP, 24, 312, 205, 18
     CONTROL         "Add to the &Start menu", IDC_SC_STARTMENU, "Button",
-                    BS_AUTOCHECKBOX | WS_TABSTOP, 160, 144, 140, 10
-    CONTROL         "", IDC_PROGRESS, "msctls_progress32", WS_BORDER, 10, 168, 300, 12
-    LTEXT           "", IDC_STATUS, 10, 186, 300, 34
-    DEFPUSHBUTTON   "&Install", IDC_INSTALL, 196, 226, 54, 16
-    PUSHBUTTON      "Cancel", IDCANCEL, 256, 226, 54, 16
+                    BS_OWNERDRAW | WS_TABSTOP, 250, 312, 205, 18
+    CONTROL         "", IDC_PROGRESS, "msctls_progress32", WS_BORDER, 24, 346, 590, 14
+    LTEXT           "Ready when you are.", IDC_STATUS, 24, 367, 400, 18
+    LTEXT           "Local install  /  Saves stay in your Windows user profile", IDC_FOOTER, 24, 410, 390, 16
+    PUSHBUTTON      "Install TTT2", IDC_INSTALL, 440, 402, 105, 28, BS_OWNERDRAW | WS_TABSTOP
+    PUSHBUTTON      "Exit", IDCANCEL, 553, 402, 61, 28, BS_OWNERDRAW | WS_TABSTOP
 END
 
-IDD_UNINSTALL DIALOGEX 0, 0, 268, 110
+IDD_UNINSTALL DIALOGEX 0, 0, 520, 245
 STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
-CAPTION "Uninstall Tekken Tag Tournament 2 (PC port)"
+CAPTION "Remove TTT2 Community Edition | Sheeda Musalli"
 FONT 9, "Segoe UI", 400, 0, 0x1
 BEGIN
-    LTEXT           "", IDC_UN_TEXT, 10, 10, 248, 34
+    ICON            IDI_TTT2SETUP, IDC_UN_ICON, 22, 10, 34, 34
+    LTEXT           "SHEEDA MUSALLI", IDC_UN_BRAND, 66, 10, 390, 20
+    LTEXT           "Remove TTT2 Community Edition", IDC_UN_TITLE, 66, 32, 390, 22
+    LTEXT           "", IDC_UN_TEXT, 22, 74, 476, 55
     CONTROL         "Also delete my &saved games, profiles and settings", IDC_UN_KEEPSAVES, "Button",
-                    BS_AUTOCHECKBOX | WS_TABSTOP, 10, 50, 240, 10
-    CONTROL         "", IDC_PROGRESS, "msctls_progress32", WS_BORDER, 10, 66, 248, 10
-    DEFPUSHBUTTON   "&Uninstall", IDOK, 144, 88, 54, 16
-    PUSHBUTTON      "Cancel", IDCANCEL, 204, 88, 54, 16
+                    BS_OWNERDRAW | WS_TABSTOP, 22, 145, 390, 18
+    CONTROL         "", IDC_PROGRESS, "msctls_progress32", WS_BORDER, 22, 177, 476, 14
+    PUSHBUTTON      "Remove", IDOK, 366, 201, 70, 28, BS_OWNERDRAW | WS_TABSTOP
+    PUSHBUTTON      "Cancel", IDCANCEL, 446, 201, 52, 28, BS_OWNERDRAW | WS_TABSTOP
 END
 
 1 VERSIONINFO
@@ -63,10 +79,11 @@ BEGIN
     BEGIN
         BLOCK "040904b0"
         BEGIN
-            VALUE "FileDescription", "Tekken Tag Tournament 2 - PC port installer"
+            VALUE "FileDescription", "TTT2 Community Installer by Sheeda Musalli"
             VALUE "FileVersion",     "@TTT2_VERSION@"
-            VALUE "ProductName",     "Tekken Tag Tournament 2 (PC port)"
+            VALUE "ProductName",     "TTT2 Community Edition | Sheeda Musalli"
             VALUE "ProductVersion",  "@TTT2_VERSION@"
+            VALUE "CompanyName",     "Sheeda Musalli"
         END
     END
     BLOCK "VarFileInfo"

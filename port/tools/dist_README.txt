@@ -11,7 +11,8 @@ Windows is already in this folder.
 
 PLAYING
 -------
-Start "Tekken Tag Tournament 2" from the desktop or the Start menu.
+Start "TTT2 Community Edition" from the desktop or the Start menu. The launcher opens first;
+choose settings on the left, press SAVE to keep them, or PLAY to start the game.
 
 An Xbox controller (or any XInput pad) is the intended way to play; whoever presses a button
 first is player 1. The keyboard also works as player 1:
@@ -22,8 +23,9 @@ first is player 1. The keyboard also works as player 1:
 
     Alt+Enter       windowed <-> borderless full screen
 
-Window mode (windowed / borderless / full screen) and the render resolution are in the game's
-own menus: OPTIONS > DISPLAY SETTINGS. EXIT on the main menu, or closing the window, quits.
+Window mode, output resolution, internal render scale, shader compilation options and save folder
+are available in the launcher. Window mode and resolution can also be changed in the game's own
+menus: OPTIONS > DISPLAY SETTINGS. EXIT on the main menu, or closing the window, quits.
 
 
 SAVES, SETTINGS AND THE LOG
@@ -40,19 +42,18 @@ The first start of a fight compiles graphics shaders, so the first few seconds c
 later runs use the cache.
 
 
-ONLINE (Steam)
---------------
-Online Player Match runs over Steam: no ports to open, no Xbox LIVE.
+ONLINE STATUS
+-------------
+The launcher includes a ranked-service panel for checking a community backend, viewing a
+provisional profile, entering matchmaking, checking queue status, and cancelling a search.
+The standalone backend does not connect the game's in-game Xbox Live session flow to a fight,
+so a queue reservation alone does not start an online match.
 
-  - The Steam client must be running and signed in on both PCs.
-  - Both players need this port installed from their own copy of the game. Install from the
-    same installer version on both PCs.
-  - Host: ONLINE MODE > PLAYER MATCH > create a session. Steam shows you as playing
-    "Spacewar" - that is Valve's public test app id this port uses for now; it is expected.
-  - Join: ONLINE MODE > PLAYER MATCH > search. Hosts on Steam playing this port are listed.
-
-The first time ONLINE MODE is opened the game shows Namco's Online Mode terms; accept them to
-continue. Online leaderboards, World Arena and voice chat are not available.
+Steam networking is disabled unless a legally authorized Steamworks App ID and SDK are configured
+for this build. App ID 480 is Valve's Spacewar example application and is not used by this port.
+Do not create a steam_appid.txt for 480 or use the launcher to impersonate Xbox Live sign-in or
+game licenses. The ranked-service panel uses its own bearer token; remote server URLs must use
+HTTPS. The local default URL is http://127.0.0.1:8765.
 
 
 UNINSTALLING

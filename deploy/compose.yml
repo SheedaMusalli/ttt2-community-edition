@@ -1,0 +1,39 @@
+services:
+  ranked:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    command: ["serve"]
+    restart: unless-stopped
+    volumes:
+      - ranked-data:/data
+    expose:
+      - "8765"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/healthz', timeout=2).read()"]
+      interval: 20s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+  proxy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on:
+      ranked:
+        condition: service_healthy
+    environment:
+      RANKED_DOMAIN: ${RANKED_DOMAIN:?Set RANKED_DOMAIN in the root .env file}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  ranked-data:
+  caddy-data:
+  caddy-config:

@@ -14,10 +14,11 @@ BEGIN
     BEGIN
         BLOCK "040904b0"
         BEGIN
-            VALUE "FileDescription", "Tekken Tag Tournament 2 (PC port)"
+            VALUE "FileDescription", "TTT2 Community Edition by Sheeda Musalli"
             VALUE "FileVersion",     "@TTT2_VERSION@"
-            VALUE "ProductName",     "Tekken Tag Tournament 2 (PC port)"
+            VALUE "ProductName",     "TTT2 Community Edition | Sheeda Musalli"
             VALUE "ProductVersion",  "@TTT2_VERSION@"
+            VALUE "CompanyName",     "Sheeda Musalli"
         END
     END
     BLOCK "VarFileInfo"

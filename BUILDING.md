@@ -39,7 +39,16 @@ the checkout path, use a junction local to your machine; it is not a project req
    no Steam online).
 6. **Build**: `tools\build_port.cmd build-o1 1 8 ON` (the game, `port\build-o1\tekken_recomp.exe`),
    then `tools\build_setup.cmd build-o1 8` (the installer, `port\build-o1\setup\ttt2_setup.exe`).
-   How the installer works: [port/INSTALLER.md](port/INSTALLER.md).
+   The installer embeds the game runtime and the pre-launch settings app. How the installer
+   works: [port/INSTALLER.md](port/INSTALLER.md).
+
+## Pre-launch settings
+
+The CMake target `ttt2_launcher` builds the Windows launcher on its own. The setup targets also
+build and embed it automatically; their desktop and Start menu shortcuts open `TTT2 Launcher.exe`.
+The launcher stores display options in `%LOCALAPPDATA%\TTT2Recomp\settings.ini` for the runtime
+to read, and its shader, renderer and save-folder choices in `launcher.ini`. Options are limited
+to controls supported by the current runtime; simulation timing remains fixed by the game.
 
 ## Running a development build
 

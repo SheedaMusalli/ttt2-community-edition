@@ -1,6 +1,7 @@
-"""Local ranked-service prototype. No game integration or public deployment implied.
+"""Standalone provisional ranked matchmaking service.
 
 Python standard library only. Ratings are provisional, based on matching peer reports.
+For Internet deployment, place behind a TLS reverse proxy (see deploy/).
 """
 import argparse
 import hashlib
@@ -11,7 +12,8 @@ import sqlite3
 import time
 import hmac
 from contextlib import closing, contextmanager
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import os
 
 HEARTBEAT_INTERVAL = 25
 HEARTBEAT_TIMEOUT = 75
@@ -224,10 +226,30 @@ class RankedStore:
             return self.match_response(db.execute("SELECT * FROM matches WHERE id=?", (mid,)).fetchone(), player)
 
 
-def make_server(store, port=8765):
+def make_server(store, port=8765, host='127.0.0.1'):
     class Handler(BaseHTTPRequestHandler):
+        protocol_version = 'HTTP/1.1'
+
         def log_message(self, *_):
             pass  # Do not log bearer tokens or payloads.
+
+        def do_GET(self):
+            if self.path != '/healthz':
+                self.send_error(404)
+                return
+            try:
+                with closing(store.connect()) as db:
+                    db.execute('SELECT 1').fetchone()
+                body = b'{"status":"ok"}'
+                self.send_response(200)
+            except sqlite3.Error:
+                body = b'{"status":"unavailable"}'
+                self.send_response(503)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(body)))
+            self.send_header('Cache-Control', 'no-store')
+            self.end_headers()
+            self.wfile.write(body)
 
         def do_POST(self):
             self.connection.settimeout(5)
@@ -255,24 +277,31 @@ def make_server(store, port=8765):
             self.send_response(status)
             self.send_header('Content-Type', 'application/json')
             self.send_header('Content-Length', str(len(body)))
+            self.send_header('Cache-Control', 'no-store')
+            self.send_header('X-Content-Type-Options', 'nosniff')
             self.end_headers()
             self.wfile.write(body)
-    return HTTPServer(('127.0.0.1', port), Handler)
+    class Server(ThreadingHTTPServer):
+        daemon_threads = True
+        allow_reuse_address = True
+    return Server((host, port), Handler)
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--db', default='ranked.sqlite3')
+    parser.add_argument('--db', default=os.environ.get('TTT2_RANKED_DB', 'ranked.sqlite3'))
     sub = parser.add_subparsers(dest='command', required=True)
     sub.add_parser('provision').add_argument('player')
-    sub.add_parser('serve').add_argument('--port', type=int, default=8765)
+    serve = sub.add_parser('serve')
+    serve.add_argument('--host', default=os.environ.get('TTT2_RANKED_HOST', '127.0.0.1'))
+    serve.add_argument('--port', type=int, default=int(os.environ.get('TTT2_RANKED_PORT', '8765')))
     args = parser.parse_args()
     store = RankedStore(args.db)
     if args.command == 'provision':
         print(store.provision(args.player))
     else:
-        server = make_server(store, args.port)
-        print(f'Local prototype listening on http://127.0.0.1:{server.server_port}', flush=True)
+        server = make_server(store, args.port, args.host)
+        print(f'Ranked service listening on {args.host}:{server.server_port}', flush=True)
         try:
             server.serve_forever()
         except KeyboardInterrupt:

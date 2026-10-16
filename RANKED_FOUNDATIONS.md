@@ -65,8 +65,10 @@ python port/tools/ranked_service.py --db ranked.sqlite3 serve
 ```
 
 Provision prints each token once; save it privately. Duplicate player IDs are rejected.
-There is no public registration endpoint. The server binds only to `127.0.0.1:8765`.
-Database files are ignored by Git. Stop with Ctrl+C. No service is left running by tests.
+There is no public registration endpoint. For local development the server binds to
+`127.0.0.1:8765`; `serve --host` and `serve --port` (also configurable through
+`TTT2_RANKED_HOST` and `TTT2_RANKED_PORT`) allow container/server binding. Database
+files are ignored by Git. Stop with Ctrl+C. No service is left running by tests.
 
 Every endpoint uses POST, JSON, and `Authorization: Bearer <player-token>`:
 
@@ -150,7 +152,7 @@ authentication -> ranked result passed`. This is a local host harness, not integ
 the game's session layer. The prototype returns its reservation token as a bearer capability
 over local HTTP and must not be exposed over an untrusted network.
 
-Thirteen Python tests pass, including a real localhost HTTP exchange between two authenticated
+Fourteen Python tests pass, including a real localhost HTTP exchange between two authenticated
 clients, concurrent queue reservation, persistence after reopening, repeated reports,
 disputes, heartbeat-based forfeits, stale-match expiry, aborts/draws and malformed/oversize
 requests. Initial testing exposed an unclosed SQLite connection on Windows; it was fixed.
@@ -159,9 +161,8 @@ Visual Studio Build Tools 2022 with the v143 toolset is installed. `test_online_
 was compiled with MSVC `/std:c++20` and executed successfully, covering rejection of 480,
 malformed values and overflow, and acceptance of a valid decimal AppID. The hardcoded
 `C:\ttt2` checkout requirement was removed from `BUILDING.md`; CMake's VC runtime lookup
-uses `VSINSTALLDIR` or standard Visual Studio installation roots. No absolute drive path
-remains in those build files. The complete game build remains blocked until XenonRecomp,
-generated PPC sources, FFmpeg source, and legally sourced game inputs are present.
+uses the active Visual Studio installation or toolchain. No absolute drive path remains in
+those build files.
 
 Remaining implementation milestones:
 
@@ -185,3 +186,67 @@ Remaining implementation milestones:
 No protected-service bypass, entitlement spoofing, or changes to original service
 authentication were added. Full online ranked multiplayer remains blocked on the game
 adapter, gameplay transport, build inputs, two-machine validation and rights review.
+
+### Server deployment package (2026-10-16)
+
+Added `deploy/Dockerfile`, `deploy/compose.yml` and `deploy/Caddyfile` for a Linux
+VPS deployment. Compose stores SQLite in a named persistent volume, keeps the
+Python service private to the Compose network, and publishes only Caddy on ports
+80/443 for automatic HTTPS. `GET /healthz` checks database availability. Follow
+`deploy/README.md` for DNS, firewall, launch, account provisioning, and backup
+steps. The HTTP server now uses request threads so simultaneous client polling
+does not block all other clients. Python remains standard-library only.
+
+Validation: the service unit suite now includes the health endpoint. The container
+image has not been built on this Windows host unless Docker verification below
+records otherwise. This package makes the provisional matchmaking service
+deployable; it does not connect the game runtime to it or make peer-reported
+outcomes authoritative. Keep it a test/community service until those gaps and
+public abuse controls have been addressed.
+
+### Windows installer build (2026-10-16)
+
+With the locally supplied `dump\Default.xex` and Title Update 3 package
+`TU_174Q22P_0000008000000.00000000000O2`, XenonRecomp analysis and source generation completed,
+and the x64 runtime and installer built successfully. The standalone artifact is
+`outputs\ttt2_setup.exe` (63,811,584 bytes, SHA-256
+`72E456FEFFD93B32B06ABBA43258376293CC68434E73A1AEB756A7AC40A86113`). It is a Windows x64
+PE executable built with Visual Studio 2022 Clang-CL and v143 libraries. The generated PPC
+code uses Clang/GNU compiler extensions, so native MSVC `cl.exe` cannot compile those sources;
+Clang-CL was used for the runtime and installer.
+
+CMake stages the VC runtime DLLs beneath the build payload before compiling resources, avoiding
+resource-compiler failures on Visual Studio paths containing spaces. The installer now carries
+the Sheeda Musalli SM icon and dark navy, teal and amber visual theme. Its install and uninstall
+dialogs, executable metadata, publisher label, default folder and shortcut use “TTT2 Community
+Edition by Sheeda Musalli.” The unprivileged preview dialog was opened and visually checked.
+The production installer was not run because it expects an original disc image (`.iso`) plus
+TU3; the supplied game directory is extracted data, not that disc image. Steamworks SDK files
+are absent, so Steam online support is disabled in this build. The ranked-service suite was
+rerun and all 13 tests passed.
+
+### Launcher ranked-service panel (2026-10-16)
+
+Added an Online page to the launcher with backend health check, profile lookup, matchmaking
+queue, status refresh and queue cancellation. It sends bearer-authenticated requests to the
+existing `/v1` service and accepts HTTPS endpoints, allowing plain HTTP only for localhost.
+The bearer token is stored encrypted with Windows DPAPI for the current Windows account.
+Match reservation tokens are hidden from the response panel. This is a launcher-to-service
+control panel only: it does not hand reservations to the game or establish a fight session.
+The installer already embeds `TTT2 Launcher.exe`, installs it beside the game, and creates
+Desktop/Start shortcuts to the launcher by default; installer copy now calls this out.
+
+The distribution README no longer instructs players to use Spacewar. Valve's Steamworks docs
+describe App ID 480 as the Spacewar example application; this project rejects it and the current
+build has no Steamworks SDK. No fake Xbox Live sign-in or game-license bypass was added. FSR and
+DLSS are not exposed as options because the runtime has no corresponding upscaler integration.
+
+The updated installer (`outputs/ttt2_setup.exe`, 65,149,440 bytes, SHA-256
+`D8B8A70DBC96616F12D0A007ACC02A4ECC0E70D3965B3C5F971B7DCDB83C82CB`) and launcher
+(`outputs/TTT2 Launcher - Online Panel.exe`, 697,856 bytes, SHA-256
+`F5C39BC89C74729B9E93503B6E23E15F4DC903CDBCF9F91991D64679DEB473D4`) were rebuilt with
+Clang-CL and the v143 Windows SDK. The installer resource's embedded launcher matches the
+standalone build byte for byte. A screenshot review found that the Online page's response box
+and explanatory note overlapped the fixed footer, and the persistent footer hint collided with
+the live status line. The response box is now shorter, both redundant notes are removed, and the
+footer status has clear space.

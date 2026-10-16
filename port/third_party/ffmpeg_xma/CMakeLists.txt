@@ -8,10 +8,10 @@
 # FFMPEG_SRC = the source tree, FFMPEG_BUILD = configure's output (config.h, avconfig.h, codec lists).
 cmake_minimum_required(VERSION 3.20)
 if(NOT DEFINED FFMPEG_SRC)
-    set(FFMPEG_SRC "C:/ttt2/tools/ffmpeg_dl/FFmpeg-n7.1")
+    set(FFMPEG_SRC "${CMAKE_SOURCE_DIR}/../tools/ffmpeg_dl/FFmpeg-n7.1")
 endif()
 if(NOT DEFINED FFMPEG_BUILD)
-    set(FFMPEG_BUILD "C:/ttt2/tools/ffmpeg_dl/build")
+    set(FFMPEG_BUILD "${CMAKE_SOURCE_DIR}/../tools/ffmpeg_dl/build")
 endif()
 include(${CMAKE_CURRENT_LIST_DIR}/sources.cmake)
 

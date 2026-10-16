@@ -10,6 +10,7 @@
 #define IDR_VCRUNTIME140       105
 #define IDR_VCRUNTIME140_1     106
 #define IDR_README             107
+#define IDR_LAUNCHER_EXE       108
 
 #define IDD_MAIN               200
 #define IDC_ISO_PATH           201
@@ -27,6 +28,20 @@
 #define IDC_TU_LABEL           213
 #define IDC_TU_PATH            214
 #define IDC_TU_BROWSE          215
+#define IDC_BRAND              216
+#define IDC_BRAND_TAG          217
+#define IDC_HEADER_TITLE       218
+#define IDC_HEADER_SUBTITLE    219
+#define IDC_INSTALL_TITLE      223
+#define IDC_INSTALL_NOTE       224
+#define IDC_SOURCE_BADGE       225
+#define IDC_UPDATE_BADGE       226
+#define IDC_DEST_BADGE         227
+#define IDC_FOOTER              228
+#define IDC_UN_BRAND            229
+#define IDC_UN_TITLE            230
+#define IDC_BRAND_ICON          231
+#define IDC_UN_ICON             232
 
 #define IDD_UNINSTALL          220
 #define IDC_UN_TEXT            221

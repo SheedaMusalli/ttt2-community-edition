@@ -2,11 +2,12 @@
 code references, so the port links. Real implementations replace these in Phase 2.
 Scans re/ppc for __imp__<Name> symbols that are NOT __imp__sub_ (those are game funcs)."""
 import re, os, glob
+from pathlib import Path
 
-PPC = r"D:\Projects\Tekken Tag Tournament 2 (USA, Europe)\re\ppc"
-OUT = r"D:\Projects\Tekken Tag Tournament 2 (USA, Europe)\port\src\runtime\kernel_stubs.gen.cpp"
-
-RUNTIME = r"D:\Projects\Tekken Tag Tournament 2 (USA, Europe)\port\src\runtime"
+ROOT = Path(__file__).resolve().parents[2]
+PPC = str(ROOT / "re" / "ppc")
+OUT = str(ROOT / "port" / "src" / "runtime" / "kernel_stubs.gen.cpp")
+RUNTIME = str(ROOT / "port" / "src" / "runtime")
 
 # Functions with real hand-written implementations must NOT get a stub (would duplicate-define).
 impl_pat = re.compile(rb"PPC_FUNC\(__imp__([A-Za-z0-9_]+)\)")

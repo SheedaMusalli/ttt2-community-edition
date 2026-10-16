@@ -18,6 +18,14 @@
 !/port/
 !/tools/
 !/re/
+!/deploy/
+
+/deploy/*
+!/deploy/Dockerfile
+!/deploy/compose.yml
+!/deploy/Caddyfile
+!/deploy/.env.example
+!/deploy/README.md
 
 /port/*
 !/port/CMakeLists.txt

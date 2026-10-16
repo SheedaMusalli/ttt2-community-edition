@@ -10,11 +10,18 @@ namespace {
 
 struct Item { int id; const wchar_t* name; };
 
+#ifndef TTT2_INSTALLER_HAS_STEAM
+#define TTT2_INSTALLER_HAS_STEAM 0
+#endif
+
 // The VC++ runtime is not part of Windows: app-local copies of exactly the four DLLs the game
 // imports (llvm-readobj --coff-imports) spare the player a redist install.
 const Item kItems[] = {
     { IDR_GAME_EXE,        L"Tekken Tag Tournament 2.exe" },
+    { IDR_LAUNCHER_EXE,    L"TTT2 Launcher.exe" },
+#if TTT2_INSTALLER_HAS_STEAM
     { IDR_STEAM_API,       L"steam_api64.dll" },
+#endif
     { IDR_MSVCP140,        L"msvcp140.dll" },
     { IDR_MSVCP140_ATOMIC, L"msvcp140_atomic_wait.dll" },
     { IDR_VCRUNTIME140,    L"vcruntime140.dll" },
@@ -60,6 +67,7 @@ bool WriteFileBytes(const std::wstring& path, const void* data, size_t size, std
 } // namespace
 
 const wchar_t kGameExeName[] = L"Tekken Tag Tournament 2.exe";
+const wchar_t kLauncherExeName[] = L"TTT2 Launcher.exe";
 
 uint64_t PayloadBytes()
 {

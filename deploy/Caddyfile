@@ -1,0 +1,4 @@
+{$RANKED_DOMAIN} {
+	encode zstd gzip
+	reverse_proxy ranked:8765
+}

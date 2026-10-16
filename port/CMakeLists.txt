@@ -34,7 +34,11 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang" AND CMAKE_CXX_COMPILER_FRONTEND_VARIAN
 else()
     target_compile_options(tekken_ppc PRIVATE "-O${TTT2_PPC_OPT_LEVEL}")
 endif()
-target_compile_options(tekken_ppc PRIVATE -Wno-everything)
+if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+    target_compile_options(tekken_ppc PRIVATE -Wno-everything)
+else()
+    target_compile_options(tekken_ppc PRIVATE /W0)
+endif()
 # Host ISA for the recompiled code. With no -march, clang-cl targets baseline x86-64
 # (SSE2), so SIMDe emulates every SSSE3/SSE4.1 op the VMX128 translation uses in scalar
 # loops - including the pshufb byte swap in every lvx/stvx (191,722 sites) and vsldoi
@@ -81,7 +85,11 @@ target_link_libraries(tekken_recomp PRIVATE d3d11 dxgi d3dcompiler)
 # (alpha stepping down ~0.005 per rendered frame, so ~200 frames) never finished inside a run.
 # The recompiled PPC library has its own configurable optimization level above.
 # (C++ only: the target also compiles game.rc, and rc.exe rejects compiler flags.)
-target_compile_options(tekken_recomp PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:-O2;-Wno-everything>")
+if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+    target_compile_options(tekken_recomp PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:-O2;-Wno-everything>")
+else()
+    target_compile_options(tekken_recomp PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:/O2;/W0>")
+endif()
 if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang" AND CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
     # Allow optimized renderer/runtime helpers to inline even in the Debug configuration.
     target_compile_options(tekken_recomp PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:/clang:-finline>")
@@ -92,7 +100,9 @@ target_link_libraries(tekken_recomp PRIVATE tekken_ppc xaudio2 ole32 winmm ttt2_
 # delay-loaded and copied next to the executable; without it (or without a running Steam
 # client) the game falls back to the loopback transport.
 set(TTT2_STEAMWORKS "${CMAKE_SOURCE_DIR}/../tools/steamworks_sdk_165/sdk" CACHE PATH "Steamworks SDK (sdk folder)")
+set(TTT2_HAVE_STEAMWORKS OFF)
 if(EXISTS "${TTT2_STEAMWORKS}/public/steam/steam_api.h" AND EXISTS "${TTT2_STEAMWORKS}/redistributable_bin/win64/steam_api64.lib")
+    set(TTT2_HAVE_STEAMWORKS ON)
     target_include_directories(tekken_recomp PRIVATE "${TTT2_STEAMWORKS}/public")
     target_compile_definitions(tekken_recomp PRIVATE TTT2_HAVE_STEAM=1)
     target_link_libraries(tekken_recomp PRIVATE "${TTT2_STEAMWORKS}/redistributable_bin/win64/steam_api64.lib" delayimp)
@@ -112,7 +122,7 @@ target_link_options(tekken_recomp PRIVATE "/MAP:tekken_recomp.map")
 # One version for the game executable's VERSIONINFO, the installer and Add or remove programs.
 set(TTT2_VERSION "0.1.5")
 string(REPLACE "." "," TTT2_VERSION_COMMAS "${TTT2_VERSION},0")
-# Original art (port/tools/make_icon.py), not the game's.
+# Original TTT2 Community Edition mark, shared by the installer and installed game executable.
 set(TTT2_SETUP_ICON "${CMAKE_SOURCE_DIR}/src/setup/ttt2.ico")
 configure_file(src/runtime/game.rc.in "${CMAKE_BINARY_DIR}/game.rc" @ONLY)
 set_source_files_properties("${CMAKE_BINARY_DIR}/game.rc" PROPERTIES OBJECT_DEPENDS "${TTT2_SETUP_ICON}")
@@ -128,25 +138,86 @@ target_sources(tekken_recomp PRIVATE "${CMAKE_BINARY_DIR}/game.rc")
 # The dev exe stays a console program so run_port.cmd / the test scripts keep their stderr.
 set(TTT2_PAYLOAD_DIR "${CMAKE_BINARY_DIR}/payload")
 set(TTT2_GAME_EXE "${TTT2_PAYLOAD_DIR}/Tekken Tag Tournament 2.exe")
+set(TTT2_LAUNCHER_EXE "${TTT2_PAYLOAD_DIR}/TTT2 Launcher.exe")
+configure_file(src/launcher/launcher.rc.in "${CMAKE_BINARY_DIR}/launcher.rc" @ONLY)
+set_source_files_properties("${CMAKE_BINARY_DIR}/launcher.rc" PROPERTIES OBJECT_DEPENDS "${TTT2_SETUP_ICON}")
+add_executable(ttt2_launcher WIN32 src/launcher/launcher.cpp "${CMAKE_BINARY_DIR}/launcher.rc")
+target_link_libraries(ttt2_launcher PRIVATE comctl32 shell32 ole32 uxtheme dwmapi winhttp crypt32)
+target_compile_definitions(ttt2_launcher PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
+    TTT2_VERSION_STR="${TTT2_VERSION}")
+if(MSVC)
+    target_compile_options(ttt2_launcher PRIVATE /O2)
+else()
+    target_compile_options(ttt2_launcher PRIVATE -O2)
+endif()
+set_property(TARGET ttt2_launcher PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded")
+set_target_properties(ttt2_launcher PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/launcher")
+add_custom_command(TARGET ttt2_launcher POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${TTT2_PAYLOAD_DIR}"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:ttt2_launcher>" "${TTT2_LAUNCHER_EXE}"
+    VERBATIM)
 set(TTT2_README_TXT "${CMAKE_SOURCE_DIR}/tools/dist_README.txt")
 set(TTT2_STEAM_DLL "${TTT2_STEAMWORKS}/redistributable_bin/win64/steam_api64.dll")
+set(TTT2_STEAM_RESOURCE_LINE "")
+set(TTT2_STEAM_RESOURCE_DEPENDENCY "")
+if(TTT2_HAVE_STEAMWORKS AND EXISTS "${TTT2_STEAM_DLL}")
+    set(TTT2_STEAM_RESOURCE_LINE "IDR_STEAM_API          RCDATA  \"@TTT2_STEAM_DLL@\"")
+    set(TTT2_STEAM_RESOURCE_DEPENDENCY "${TTT2_STEAM_DLL}")
+endif()
 set(XENON_THIRDPARTY "${XENON_UTILS}/../thirdparty")
 find_program(TTT2_EDITBIN editbin)
-if(DEFINED ENV{VSINSTALLDIR})
-    file(GLOB TTT2_CRT_DIRS "$ENV{VSINSTALLDIR}/VC/Redist/MSVC/*/x64/Microsoft.VC*.CRT")
+if(NOT TTT2_EDITBIN AND CMAKE_CXX_COMPILER)
+    get_filename_component(TTT2_COMPILER_BIN "${CMAKE_CXX_COMPILER}" DIRECTORY)
+    find_program(TTT2_EDITBIN editbin HINTS "${TTT2_COMPILER_BIN}")
 endif()
-if(NOT TTT2_CRT_DIRS)
-    file(GLOB TTT2_CRT_DIRS "$ENV{ProgramFiles(x86)}/Microsoft Visual Studio/2022/*/VC/Redist/MSVC/*/x64/Microsoft.VC*.CRT"
-                             "$ENV{ProgramFiles}/Microsoft Visual Studio/2022/*/VC/Redist/MSVC/*/x64/Microsoft.VC*.CRT")
+if(CMAKE_GENERATOR_INSTANCE)
+    set(TTT2_VS_ROOT "${CMAKE_GENERATOR_INSTANCE}")
+elseif(DEFINED ENV{VSINSTALLDIR})
+    set(TTT2_VS_ROOT "$ENV{VSINSTALLDIR}")
+elseif(CMAKE_CXX_COMPILER_AR)
+    # For Ninja builds, derive the VS root from the bundled LLVM archive tool.
+    get_filename_component(TTT2_TOOLCHAIN_BIN "${CMAKE_CXX_COMPILER_AR}" DIRECTORY)
+    get_filename_component(TTT2_VS_ROOT "${TTT2_TOOLCHAIN_BIN}/../../../.." ABSOLUTE)
+endif()
+if(TTT2_VS_ROOT)
+    file(GLOB TTT2_CRT_DIRS "${TTT2_VS_ROOT}/VC/Redist/MSVC/*/x64/Microsoft.VC*.CRT")
+    if(NOT TTT2_EDITBIN)
+        file(GLOB TTT2_EDITBIN_CANDIDATES
+            "${TTT2_VS_ROOT}/VC/Tools/MSVC/*/bin/Hostx64/x64/editbin.exe")
+        list(SORT TTT2_EDITBIN_CANDIDATES)
+        list(REVERSE TTT2_EDITBIN_CANDIDATES)
+        if(TTT2_EDITBIN_CANDIDATES)
+            list(GET TTT2_EDITBIN_CANDIDATES 0 TTT2_EDITBIN)
+        endif()
+    endif()
 endif()
 list(SORT TTT2_CRT_DIRS)
 list(REVERSE TTT2_CRT_DIRS)
-if(TTT2_CRT_DIRS AND TTT2_EDITBIN AND EXISTS "${TTT2_STEAM_DLL}" AND EXISTS "${XENON_UTILS}/xex_patcher.cpp")
+if(TTT2_CRT_DIRS AND TTT2_EDITBIN AND EXISTS "${XENON_UTILS}/xex_patcher.cpp")
     list(GET TTT2_CRT_DIRS 0 TTT2_CRT_DIR)
-    set(CRT_MSVCP140        "${TTT2_CRT_DIR}/msvcp140.dll")
-    set(CRT_MSVCP140_ATOMIC "${TTT2_CRT_DIR}/msvcp140_atomic_wait.dll")
-    set(CRT_VCRUNTIME140    "${TTT2_CRT_DIR}/vcruntime140.dll")
-    set(CRT_VCRUNTIME140_1  "${TTT2_CRT_DIR}/vcruntime140_1.dll")
+    # Stage the runtime DLLs beside the other installer inputs. The Windows resource
+    # compiler mishandles absolute Visual Studio paths containing spaces on some hosts.
+    set(CRT_MSVCP140        "${TTT2_PAYLOAD_DIR}/msvcp140.dll")
+    set(CRT_MSVCP140_ATOMIC "${TTT2_PAYLOAD_DIR}/msvcp140_atomic_wait.dll")
+    set(CRT_VCRUNTIME140    "${TTT2_PAYLOAD_DIR}/vcruntime140.dll")
+    set(CRT_VCRUNTIME140_1  "${TTT2_PAYLOAD_DIR}/vcruntime140_1.dll")
+    add_custom_command(OUTPUT
+            "${CRT_MSVCP140}" "${CRT_MSVCP140_ATOMIC}"
+            "${CRT_VCRUNTIME140}" "${CRT_VCRUNTIME140_1}"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${TTT2_PAYLOAD_DIR}"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${TTT2_CRT_DIR}/msvcp140.dll" "${CRT_MSVCP140}"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${TTT2_CRT_DIR}/msvcp140_atomic_wait.dll" "${CRT_MSVCP140_ATOMIC}"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${TTT2_CRT_DIR}/vcruntime140.dll" "${CRT_VCRUNTIME140}"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${TTT2_CRT_DIR}/vcruntime140_1.dll" "${CRT_VCRUNTIME140_1}"
+        DEPENDS
+            "${TTT2_CRT_DIR}/msvcp140.dll"
+            "${TTT2_CRT_DIR}/msvcp140_atomic_wait.dll"
+            "${TTT2_CRT_DIR}/vcruntime140.dll"
+            "${TTT2_CRT_DIR}/vcruntime140_1.dll"
+        VERBATIM)
+    add_custom_target(ttt2_crt_payload DEPENDS
+        "${CRT_MSVCP140}" "${CRT_MSVCP140_ATOMIC}"
+        "${CRT_VCRUNTIME140}" "${CRT_VCRUNTIME140_1}")
 
     add_custom_command(OUTPUT "${TTT2_GAME_EXE}"
         COMMAND ${CMAKE_COMMAND} -E make_directory "${TTT2_PAYLOAD_DIR}"
@@ -172,7 +243,11 @@ if(TTT2_CRT_DIRS AND TTT2_EDITBIN AND EXISTS "${TTT2_STEAM_DLL}" AND EXISTS "${X
         "${XENON_THIRDPARTY}/tiny-AES-c"
         "${XENON_THIRDPARTY}/TinySHA1")
     target_compile_definitions(ttt2_setup_core PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
-    target_compile_options(ttt2_setup_core PRIVATE -O2 -Wno-everything)
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+        target_compile_options(ttt2_setup_core PRIVATE -O2 -Wno-everything)
+    else()
+        target_compile_options(ttt2_setup_core PRIVATE /O2 /W0)
+    endif()
     set_property(TARGET ttt2_setup_core PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded")
 
     # ttt2_setup: the shipped installer (requireAdministrator). ttt2_setup_probe: the same
@@ -189,15 +264,18 @@ if(TTT2_CRT_DIRS AND TTT2_EDITBIN AND EXISTS "${TTT2_STEAM_DLL}" AND EXISTS "${X
         # The .rc pulls these in by PATH: without OBJECT_DEPENDS a rebuilt game exe would not
         # relink the installer, which would silently ship the previous build (T&J lesson).
         set_source_files_properties("${CMAKE_BINARY_DIR}/${variant}.rc" PROPERTIES OBJECT_DEPENDS
-            "${TTT2_GAME_EXE};${TTT2_SETUP_ICON};${TTT2_README_TXT};${TTT2_STEAM_DLL};${TTT2_SETUP_MANIFEST}")
+            "${TTT2_GAME_EXE};${TTT2_LAUNCHER_EXE};${TTT2_SETUP_ICON};${TTT2_README_TXT};${TTT2_STEAM_RESOURCE_DEPENDENCY};${TTT2_SETUP_MANIFEST}")
         add_executable(${variant} WIN32
             src/setup/setup_main.cpp
             src/setup/payload.cpp
             "${CMAKE_BINARY_DIR}/${variant}.rc")
         add_dependencies(${variant} ttt2_game_exe)
-        target_link_libraries(${variant} PRIVATE ttt2_setup_core comctl32 shell32 ole32 shlwapi advapi32 uuid bcrypt)
+        add_dependencies(${variant} ttt2_launcher)
+        add_dependencies(${variant} ttt2_crt_payload)
+        target_link_libraries(${variant} PRIVATE ttt2_setup_core comctl32 shell32 ole32 shlwapi advapi32 uuid bcrypt uxtheme dwmapi)
         target_compile_definitions(${variant} PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
-                                   TTT2_VERSION_STR="${TTT2_VERSION}")
+                                   TTT2_VERSION_STR="${TTT2_VERSION}"
+                                   TTT2_INSTALLER_HAS_STEAM=$<BOOL:${TTT2_HAVE_STEAMWORKS}>)
         target_compile_options(${variant} PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:-O2>")
         target_link_options(${variant} PRIVATE /MANIFEST:NO)   # the manifest is in the .rc
         set_property(TARGET ${variant} PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded")
@@ -205,5 +283,5 @@ if(TTT2_CRT_DIRS AND TTT2_EDITBIN AND EXISTS "${TTT2_STEAM_DLL}" AND EXISTS "${X
     endforeach()
     message(STATUS "installer: ttt2_setup available (CRT ${TTT2_CRT_DIR})")
 else()
-    message(STATUS "installer: unavailable (needs the x64 VC++ redist, editbin, the Steamworks SDK and XenonUtils)")
+    message(STATUS "installer: unavailable (needs the x64 VC++ redist, editbin and XenonUtils)")
 endif()

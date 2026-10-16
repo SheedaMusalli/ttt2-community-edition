@@ -171,6 +171,19 @@ class RankedTests(unittest.TestCase):
             thread.join()
             server.server_close()
 
+    def test_health_endpoint(self):
+        server = make_server(self.store, 0)
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        try:
+            with urllib.request.urlopen(f'http://127.0.0.1:{server.server_port}/healthz', timeout=3) as response:
+                self.assertEqual(response.status, 200)
+                self.assertEqual(json.load(response), {'status': 'ok'})
+        finally:
+            server.shutdown()
+            thread.join()
+            server.server_close()
+
 
 if __name__ == '__main__':
     unittest.main()

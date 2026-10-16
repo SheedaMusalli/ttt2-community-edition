@@ -147,10 +147,20 @@ def parse_xex_patch_descriptor(xexp_bytes):
 
 
 if __name__ == "__main__":
-    upd_dir = r"D:\Projects\Tekken Tag Tournament 2 (USA, Europe)\Updates"
-    out_root = r"D:\Projects\Tekken Tag Tournament 2 (USA, Europe)\re\extracted_tu"
-    for fn in sorted(os.listdir(upd_dir)):
-        path = os.path.join(upd_dir, fn)
+    from pathlib import Path
+    import argparse
+
+    root = Path(__file__).resolve().parents[2]
+    parser = argparse.ArgumentParser(description="Extract Xbox 360 title-update packages (STFS).")
+    parser.add_argument("updates", nargs="?", type=Path, default=root / "Updates",
+                        help="an STFS package or a directory containing packages (default: %(default)s)")
+    parser.add_argument("--out", type=Path, default=root / "re" / "extracted_tu",
+                        help="directory for extracted package contents (default: %(default)s)")
+    args = parser.parse_args()
+    packages = [args.updates] if args.updates.is_file() else sorted(args.updates.iterdir())
+    for package in packages:
+        path = str(package)
+        fn = package.name
         print(f"\n=== {fn} ===")
         try:
             s = STFS(path)
@@ -165,21 +175,23 @@ if __name__ == "__main__":
             print(f"  file-table error: {e}")
             continue
         files = [e for e in entries if not e["is_dir"]]
-        outdir = os.path.join(out_root, fn)
-        os.makedirs(outdir, exist_ok=True)
-        for e in files:
-            print(f"    {e['size']:>10}  start={e['start']:<6} blocks={e['blocks']:<5} {e['name']}")
-            try:
-                data = s.read_file(e)
-            except Exception as ex:
-                print(f"        read error: {ex}")
-                continue
-            with open(os.path.join(outdir, e["name"]), "wb") as g:
-                g.write(data)
-            if e["name"].lower().endswith(".xexp"):
-                info = parse_xex_patch_descriptor(data)
-                if info:
-                    for k in ("source_version", "target_version", "exec_title_id", "exec_media_id"):
-                        if k in info:
-                            print(f"        {k} = {info[k]}")
-                    print(f"        opt_keys = {list(info['optional_keys'].keys())}")
+        outdir = args.out / fn
+        outdir.mkdir(parents=True, exist_ok=True)
+        try:
+            for e in files:
+                print(f"    {e['size']:>10}  start={e['start']:<6} blocks={e['blocks']:<5} {e['name']}")
+                try:
+                    data = s.read_file(e)
+                except Exception as ex:
+                    print(f"        read error: {ex}")
+                    continue
+                (outdir / e["name"]).write_bytes(data)
+                if e["name"].lower().endswith(".xexp"):
+                    info = parse_xex_patch_descriptor(data)
+                    if info:
+                        for k in ("source_version", "target_version", "exec_title_id", "exec_media_id"):
+                            if k in info:
+                                print(f"        {k} = {info[k]}")
+                        print(f"        opt_keys = {list(info['optional_keys'].keys())}")
+        finally:
+            s.f.close()

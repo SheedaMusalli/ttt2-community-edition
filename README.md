@@ -1,3 +1,5 @@
+> **Ranked foundations development branch:** Networking defaults to localhost. Steam requires an authorized configured AppID; Spacewar is rejected. The new standalone ranked service is a tested local prototype, not yet connected to gameplay. See [RANKED_FOUNDATIONS.md](RANKED_FOUNDATIONS.md) for setup, findings, tests and blockers. The upstream release instructions below describe the original project.
+
 <p align="center">
   <img src=".github/assets/banner.png" alt="Tekken Tag Tournament 2 - native PC port" width="100%">
 </p>

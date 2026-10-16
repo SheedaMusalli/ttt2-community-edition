@@ -1,4 +1,4 @@
-// Steam backend of the online layer (port/ONLINE_PLAN.md phase 4): App ID 480, peer packets over
+// Steam backend of the online layer: requires a configured authorized AppID; peer packets over
 // SteamNetworkingMessages (Valve relays, no port forwarding), sessions as Steam lobbies, a friend's
 // "Join Game" as the game's own invite. Built only when the Steamworks SDK is present
 // (TTT2_HAVE_STEAM); otherwise every call reports "not running" and the loopback backend is used.

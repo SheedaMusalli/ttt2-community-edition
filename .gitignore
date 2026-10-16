@@ -13,6 +13,7 @@
 !/.gitignore
 !/README.md
 !/BUILDING.md
+!/RANKED_FOUNDATIONS.md
 !/.github/
 !/port/
 !/tools/
@@ -24,6 +25,7 @@
 !/port/src/
 !/port/tools/
 !/port/third_party/
+!/port/third_party/enet/
 
 /tools/*
 !/tools/*.cmd
@@ -39,6 +41,8 @@
 
 __pycache__/
 *.pyc
+*.sqlite3
+*.sqlite3-*
 
 # --- Disc / update sourced content (regenerated locally from the user's dump) ---
 *.iso

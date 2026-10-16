@@ -64,9 +64,12 @@ bool Start(Receiver receiver)
     std::lock_guard l(g_mutex);
     if (g_started) return true;
     const char* choice = std::getenv("TTT2_NET");
-    const bool wantLoopback = choice && std::strcmp(choice, "loopback") == 0;
     const bool needSteam = choice && std::strcmp(choice, "steam") == 0;
-    if (!wantLoopback)
+    if (choice && std::strcmp(choice, "loopback") != 0 && !needSteam) {
+        std::fprintf(stderr, "[net] unknown TTT2_NET backend\n");
+        return false;
+    }
+    if (needSteam)
     {
         g_receiver = receiver;
         if (steamnet::Start(FromSteam))

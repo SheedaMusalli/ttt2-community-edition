@@ -14,8 +14,9 @@ this repository (neither is anything else from the disc or the updates).
 - CMake + Ninja (the copies bundled with Visual Studio are fine)
 - Python 3.10+ (Pillow for the image tools)
 
-The scripts expect the checkout at `C:\ttt2` (a junction is fine: `mklink /J C:\ttt2 <checkout>`),
-because some tools choke on spaces and parentheses in paths.
+Use the checkout's actual path for CMake and the scripts. For example, from the repository root:
+`cmake -S port -B port/build -G Ninja`. If a particular legacy script cannot handle spaces in
+the checkout path, use a junction local to your machine; it is not a project requirement.
 
 ## Steps
 

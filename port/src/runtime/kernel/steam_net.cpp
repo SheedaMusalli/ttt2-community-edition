@@ -7,6 +7,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include "steam_net.h"
+#include "online_policy.h"
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -190,17 +191,28 @@ bool Start(Receiver receiver)
     static bool tried = false;
     if (tried) return false;
     tried = true;
+    const uint32_t appId = net::ParseSteamAppId(std::getenv("TTT2_STEAM_APP_ID"));
+    if (!appId) {
+        std::fprintf(stderr, "[steam] disabled: configure an authorized TTT2_STEAM_APP_ID (Spacewar is rejected)\n");
+        return false;
+    }
     if (!LoadLibraryW(L"steam_api64.dll"))
     {
         std::fprintf(stderr, "[steam] steam_api64.dll not found - Steam online unavailable\n");
         return false;
     }
-    SetEnvironmentVariableW(L"SteamAppId", L"480");
-    SetEnvironmentVariableW(L"SteamGameId", L"480");
+    const std::string appIdText = std::to_string(appId);
+    SetEnvironmentVariableA("SteamAppId", appIdText.c_str());
+    SetEnvironmentVariableA("SteamGameId", appIdText.c_str());
     SteamErrMsg error = {};
     if (SteamAPI_InitEx(&error) != k_ESteamAPIInitResult_OK)
     {
         std::fprintf(stderr, "[steam] not available: %s\n", error);
+        return false;
+    }
+    if (SteamUtils()->GetAppID() != appId) {
+        std::fprintf(stderr, "[steam] initialized AppID differs from configured AppID; refusing online\n");
+        SteamAPI_Shutdown();
         return false;
     }
     SteamAPI_ManualDispatch_Init();
@@ -210,8 +222,8 @@ bool Start(Receiver receiver)
     g_local = SteamUser()->GetSteamID().ConvertToUint64();
     g_running = true;
     std::thread(Service).detach();
-    std::fprintf(stderr, "[steam] running as %s (%016llX), app 480\n", SteamFriends()->GetPersonaName(),
-                 (unsigned long long)g_local.load());
+    std::fprintf(stderr, "[steam] running as %s (%016llX), app %u\n", SteamFriends()->GetPersonaName(),
+                 (unsigned long long)g_local.load(), appId);
     return true;
 }
 

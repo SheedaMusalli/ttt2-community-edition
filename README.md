@@ -73,6 +73,15 @@ See [RANKED_FOUNDATIONS.md](RANKED_FOUNDATIONS.md) for the inspected integration
 test results, deployment notes, and remaining blockers. Do not treat this prototype as a
 production competitive service.
 
+## Help make ranked play possible
+
+Contributions are welcome. The most useful next steps are verified, testable work on the
+standalone service and transport, plus documentation and reproducible build improvements.
+Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening an issue or pull request. In particular,
+the game runtime's session boundary needs real, lawful local game inputs and runtime telemetry
+before it can be integrated safely. Reports that include reproducible steps, logs with personal
+tokens removed, and focused tests help move that work forward.
+
 ## Rights and redistribution
 
 The installer embeds a recompiled game executable, and this repository does not declare a

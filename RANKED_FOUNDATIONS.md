@@ -8,9 +8,12 @@ The Python service is not wired into the game's C++ session layer, and carries n
 packets. Existing upstream player-match claims have not been reproduced here.
 
 Upstream baseline: `3ba28b2aa88d4b880b4e1ab71d5df6d15609d969` (tag `upstream-baseline`).
-Work is isolated on `ranked-foundations`; `main` and `origin/main` remain at that baseline.
-The sibling `ttt2-upstream` folder is a clean Git worktree of `main` sharing Git objects
-with this clone. No remote changes were pushed. No game files were downloaded.
+The community edition source is published in the `SheedaMusalli/ttt2-community-edition`
+repository. The original upstream repository and its baseline remain separate. Local game
+disc and update inputs, generated game files, and build outputs are excluded from Git; see
+`.gitignore`. Check the repository's current release page separately from this source tree:
+some builds may contain game-derived executable code and need rights review before public
+redistribution.
 
 ## Inspection findings
 

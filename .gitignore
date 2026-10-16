@@ -1,8 +1,7 @@
 # ============================================================================
-#  NOTHING DERIVED FROM THE GAME DISC OR TITLE UPDATES MAY EVER BE COMMITTED.
-#  This project ships no game data. The installer extracts everything from a
-#  user-supplied disc image + the user's own title-update files. That is what
-#  makes the project publishable. (Same hard rule as the Tom & Jerry port.)
+#  NOTHING DERIVED FROM THE GAME DISC OR TITLE UPDATES MAY BE COMMITTED HERE.
+#  The source tree expects locally supplied game inputs. Do not publish builds
+#  that embed game-derived code or data unless redistribution rights are clear.
 # ============================================================================
 
 # --- ALLOWLIST: nothing is tracked unless listed here. The working folder also holds the disc
@@ -12,6 +11,7 @@
 /*
 !/.gitignore
 !/README.md
+!/CONTRIBUTING.md
 !/BUILDING.md
 !/RANKED_FOUNDATIONS.md
 !/.github/

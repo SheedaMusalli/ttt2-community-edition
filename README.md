@@ -1,90 +1,61 @@
 # Tekken Tag Tournament 2 Community Edition
 
-An experimental Windows port of *Tekken Tag Tournament 2* built from a static recompilation
-of the Xbox 360 release. This repository contains the launcher, installer source, runtime
-integration, and development tools for the community edition. It is an unofficial project and
-is not affiliated with Bandai Namco, Microsoft, or Valve.
+An unofficial Windows community project for running *Tekken Tag Tournament 2* through a native static recompilation. This v2 update focuses on launcher controls, local keyboard play, graphics initialization, and performance diagnostics. It is not affiliated with Bandai Namco, Microsoft, or Valve.
 
-## What works in this build
+## Current features
 
-- The installer processes a user-provided Xbox 360 disc image and Title Update 3 locally.
-- The pre-launch menu can configure display mode, output resolution, internal render scale,
-  shader compilation preferences, renderer selection, save location, and keyboard bindings.
-- Save data can be backed up and restored from the launcher.
-- The launcher's Online page can check a ranked-service server, read a provisional profile,
-  join or cancel a queue, and refresh queue status. Its bearer token is protected with Windows
-  DPAPI for the current Windows account.
-- A Python standard-library matchmaking and provisional rating service is included for local
-  testing or self-hosting.
+- **Launcher settings:** Configure display mode, output resolution, render scale, input polling (250, 500, 750, or 1000 Hz), save location, and shader options. Launcher pages expand and center on wide windows, adapt control layouts to available width, and scroll when a page is taller than the window.
+- **Keyboard controls:** Click a binding and press a key to assign it. Player 1 and Player 2 each have D-pad, face, shoulder, Start/Back, LS click, RS click, and LS/RS directional bindings. The in-game keyboard setup reads and edits Player 1's saved bindings.
+- **Local two-player keyboard play:** Enable **Player 2 keyboard** in Controls to publish a separate second keyboard pad alongside Player 1. Player 2 has its own default layout and can be rebound independently. A physical controller remains supported. Spacebar has no hidden Start/menu action; bind it explicitly if desired.
+- **Performance overlay:** Choose FPS, frame-time graph, CPU/GPU utilization, system and process memory, GPU memory, and CPU/GPU temperature metrics. Temperature readings can be unavailable when Windows or the hardware does not expose a supported sensor.
+- **Shader cache warm-up:** Previously cached D3D11 shader variants are prepared before the first game draw. The warm-up window reports progress, known variant count, and an ETA. A shader variant the game has never encountered cannot be compiled in advance; it is compiled when first discovered and can still cause a hitch.
+- **Graphics path:** The runtime provides Direct3D 11 hardware rendering and a software fallback. D3D12, Vulkan, FSR, and DLSS are not implemented. GPU rendering accelerates supported rasterization and pixel-shader work, while guest command processing and some vertex work still use the CPU.
+- **Save tools:** Choose a save folder and create or restore local save backups from the launcher.
+- **Ranked-service prototype:** The launcher can contact a self-hosted service, request a profile, enter or cancel a queue, and refresh status. The Python standard-library service stores reservations and provisional ratings.
 
-The launcher service panel is not connected to the game's in-match session calls. A queue
-reservation does not start a fight. Steam matchmaking, FSR, and DLSS are not available in this
-build. Treat the ranked ratings as a prototype: results are peer-reported and are not protected
-against modified or colluding clients.
+## Important limitations
+
+The ranked service does not connect two game sessions or carry fight traffic. A queue reservation does not start a match, and ratings are based on client reports rather than trusted game results. Full ranked play still needs a verified game-session adapter, gameplay transport, and tests between separate clients. This project does not spoof Xbox Live or bypass game-license checks. App ID 480 is rejected; Steam integration requires an authorized app ID and SDK.
+
+The game loop currently runs at approximately 60 simulation updates per second. A high-refresh display can improve scanout, but does not make the game produce 180 unique simulation frames per second. Reported stage-specific slowdowns have not been reproduced and validated across every stage; the overlay and logs are diagnostic tools, not a guarantee that all frame drops are fixed.
 
 ## Install and play
 
-Use Windows 10 or 11, 64-bit, with a DirectX 11-capable graphics device and about 13 GB of free
-space. You must provide a legally obtained Xbox 360 disc image of the game and its Title Update
-3 package. The installer extracts and processes those inputs on your PC. It installs the
-launcher beside the runtime and creates Desktop and Start menu shortcuts to the launcher by
-default. The launcher can be used to configure settings, open the log or save folder, and start
-the game.
+Use 64-bit Windows 10 or 11, a Direct3D 11-capable graphics device, and about 13 GB of free space. You must provide a legally obtained Xbox 360 disc image and Title Update 3. The installer processes those inputs locally and installs the launcher beside the runtime. The launcher can configure settings, open the save folder or log, and start the game.
 
-The installer and runtime are unsigned community builds. Review the source and build locally
-if you do not want to run a binary obtained from another person.
+The installer and runtime are unsigned community builds. Review the source and build locally if you do not want to run binaries from another person. Do not redistribute game-derived files unless you have confirmed the necessary rights.
 
 ## Build from source
 
-Building the game runtime requires the original dump and update inputs, the XenonRecomp source
-tree and generated files, and a Windows x64 C++ toolchain. This workspace was built with
-Visual Studio 2022 Build Tools, the v143 libraries, and Clang-CL; native MSVC cannot compile
-some generated PowerPC translation code. Start with [BUILDING.md](BUILDING.md) for the build
-layout and toolchain details, and [port/INSTALLER.md](port/INSTALLER.md) for installer inputs
-and behavior.
+The game runtime build requires the original dump and update inputs, the XenonRecomp source and generated files, and a Windows x64 C++ toolchain. This project has been built with Visual Studio 2022 Build Tools, v143 libraries, and Clang-CL; native MSVC cannot compile some generated PowerPC translation code. See [BUILDING.md](BUILDING.md) for setup and [port/INSTALLER.md](port/INSTALLER.md) for installer inputs.
 
-Run the ranked service tests with Python 3.10 or newer:
+Run the ranked-service unit tests with Python 3.10 or newer:
 
 ```powershell
 python -m unittest discover -s port/tools -p test_ranked_service.py -v
 ```
 
-The service can be started locally after provisioning test accounts:
+Run the input-polling harness:
+
+```powershell
+python port/tools/test_input_polling.py
+```
+
+Start a local service after provisioning test accounts:
 
 ```powershell
 python port/tools/ranked_service.py --db ranked.sqlite3 provision player_one
 python port/tools/ranked_service.py --db ranked.sqlite3 serve
 ```
 
-The `provision` command prints a bearer token once. Keep it private. For a second test account,
-run `provision` with another player ID. The launcher defaults to `http://127.0.0.1:8765`; it
-requires HTTPS when connecting to a non-local server. See [deploy/README.md](deploy/README.md)
-for the experimental Docker Compose setup.
+`provision` prints a bearer token once. Keep it private. Provision a second player with a different ID to test matchmaking. The launcher defaults to `http://127.0.0.1:8765` and requires HTTPS for non-local servers. See [deploy/README.md](deploy/README.md) for the experimental Docker Compose setup.
 
-## Online status and project boundaries
+## Contributing
 
-The standalone service manages matchmaking reservations and provisional ratings only. It does
-not carry gameplay traffic or arbitrate the game's real ranked results. Full in-game online play
-still needs verified guest session data, a runtime adapter, gameplay transport, and testing
-between two separate clients. This build does not impersonate Xbox Live or bypass game-license
-checks. App ID 480 is rejected; Steam support requires an authorized app ID and SDK.
+Contributions are welcome, especially reproducible performance captures, build fixes, test coverage, and work on the standalone ranked-service boundary. Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening an issue or pull request. The game-session boundary needs lawful local game inputs and runtime telemetry before it can be integrated safely. Remove personal tokens from logs before sharing them.
 
-See [RANKED_FOUNDATIONS.md](RANKED_FOUNDATIONS.md) for the inspected integration boundaries,
-test results, deployment notes, and remaining blockers. Do not treat this prototype as a
-production competitive service.
+See [RANKED_FOUNDATIONS.md](RANKED_FOUNDATIONS.md) for the service architecture, verification results, deployment notes, and remaining blockers.
 
-## Help make ranked play possible
+## Rights and third-party code
 
-Contributions are welcome. The most useful next steps are verified, testable work on the
-standalone service and transport, plus documentation and reproducible build improvements.
-Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening an issue or pull request. In particular,
-the game runtime's session boundary needs real, lawful local game inputs and runtime telemetry
-before it can be integrated safely. Reports that include reproducible steps, logs with personal
-tokens removed, and focused tests help move that work forward.
-
-## Rights and redistribution
-
-The installer embeds a recompiled game executable, and this repository does not declare a
-license that grants redistribution rights for the full project. Do not redistribute the
-installer or game-derived files unless you have confirmed the necessary rights. Third-party
-components retain their own licenses; see their accompanying notices and source trees.
+This repository does not declare a license that grants redistribution rights for the full game-derived project. Do not redistribute the installer or game-derived files unless you have confirmed the necessary rights. Third-party components retain their own licenses; see their included notices and source trees.

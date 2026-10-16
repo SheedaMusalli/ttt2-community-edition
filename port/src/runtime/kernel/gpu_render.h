@@ -34,6 +34,8 @@ void GpuFillEdram(uint32_t colorBase, uint32_t pitch, uint32_t height, uint32_t 
 // TTT2_GPU_HW=compare also runs the CPU renderer and compares every resolve.
 // GpuHwMode: 0 off (CPU renderer), 1 hardware, 2 compare.
 int GpuHwMode();
+// DXGI local-video-memory usage/budget for the selected adapter; zero when unavailable.
+void GpuHwReadMemoryUsage(uint64_t* usage, uint64_t* budget);
 // srcSelect: RB_COPY_CONTROL.copy_src_select (4 = depth from depthBase, RB_DEPTH_INFO base);
 // depthFloat: RB_DEPTH_INFO.depth_format (D24FS8).
 void GpuHwResolve(uint32_t colorBase, uint32_t destBase, uint32_t pitch, uint32_t height,

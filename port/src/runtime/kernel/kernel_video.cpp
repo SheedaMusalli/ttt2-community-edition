@@ -17,6 +17,7 @@
 #include <intrin.h>
 #include "kernel_trace.h"
 #include "gpu_render.h"
+#include "performance_overlay.h"
 #include "phys_mirror.h"
 #include "gpu_ring_reader.h"
 #include "bounded_format.h"
@@ -266,6 +267,7 @@ static unsigned __stdcall PresentThread(void*)
                              rc.right - rc.left, rc.bottom - rc.top,
                              nullptr, nullptr, wc.hInstance, nullptr);
     if (!wnd) return 0;
+    performance_overlay::Start(wnd);
     GpuHwSetWindow(wnd);
     if (GpuHwMode())
     {
@@ -322,6 +324,7 @@ static unsigned __stdcall PresentThread(void*)
             StretchDIBits(dc, 0, 0, FB_W, FB_H, 0, 0, FB_W, FB_H,
                           staging, &bmi, DIB_RGB_COLORS, SRCCOPY);
             ReleaseDC(wnd, dc);
+            performance_overlay::NotifyPresent();
             // TTT2_FBSEQ=<n>: also keep every n-th presented frame as its own numbered file, so a
             // run produces a filmstrip. A single overwritten dump cannot tell a black screen
             // from an animation caught mid-fade.
@@ -439,6 +442,7 @@ static void HwPresentFrame(uint32_t fb)
         rampVersion = v;
     }
     if (!fb || !GpuHwPresent(fb, SwizzleSwapsRB(g_frontBufferSwizzle.load()), ramp, rampVersion)) return;
+    performance_overlay::NotifyPresent();
     if (FrameTimeLog())
     {
         static FrameTimer presents{ "present" };

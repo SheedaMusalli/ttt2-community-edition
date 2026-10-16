@@ -14,11 +14,13 @@ PLAYING
 Start "TTT2 Community Edition" from the desktop or the Start menu. The launcher opens first;
 choose settings on the left, press SAVE to keep them, or PLAY to start the game.
 
-An Xbox controller (or any XInput pad) is the intended way to play; whoever presses a button
-first is player 1. The keyboard also works as player 1:
+An Xbox controller (or any XInput pad) is supported. In the launcher, open CONTROLS, click any
+binding, and press a key to assign it. Player 1 keyboard controls are enabled by default. Enable
+PLAYER 2 KEYBOARD there for local two-player play without a second controller. Stick directions
+can be bound independently for both players.
 
     Arrow keys      D-pad                 A / S / Z / X   A / B / X / Y buttons
-    Enter or Space  START                 Q / W           left / right bumper
+    Enter           START                 Q / W           left / right bumper
     Backspace       BACK
 
     Alt+Enter       windowed <-> borderless full screen
@@ -38,8 +40,10 @@ Everything the game writes goes to
 folder unless you tick "Also delete my saved games". If something goes wrong, log.txt from
 there is the file to send.
 
-The first start of a fight compiles graphics shaders, so the first few seconds can stutter;
-later runs use the cache.
+Previously captured shader variants are prepared during graphics initialization before the
+first game draw. A variant the game has never encountered still compiles on first use and may
+stutter briefly; later launches reuse the shader cache. The cache stays in the current Windows
+user's TTT2Recomp data folder and is not included in the installer.
 
 
 ONLINE STATUS

@@ -78,7 +78,7 @@ target_compile_definitions(tekken_recomp PRIVATE TTT2_DRAW_CAPTURE_DIAGNOSTICS=1
 target_compile_definitions(tekken_recomp PRIVATE TTT2_D3D11_MOVIE_BACKEND=1)
 # Hardware renderer (gpu_hw_d3d11.h); still opt-in at run time with TTT2_GPU_HW=1 / compare.
 target_compile_definitions(tekken_recomp PRIVATE TTT2_GPU_HW_BACKEND=1)
-target_link_libraries(tekken_recomp PRIVATE d3d11 dxgi d3dcompiler)
+target_link_libraries(tekken_recomp PRIVATE d3d11 dxgi d3dcompiler pdh psapi)
 # The runtime is ~10 hand-written files, so optimising it costs seconds of build time - and it
 # carries the software rasterizer, which interprets a pixel shader PER PIXEL and shades about
 # 2.5 M pixels a frame. At -O0 that was slow enough that the opening video's white fade-in
@@ -120,7 +120,7 @@ target_link_options(tekken_recomp PRIVATE "/MAP:tekken_recomp.map")
 
 # --- Version, icon -------------------------------------------------------------------------
 # One version for the game executable's VERSIONINFO, the installer and Add or remove programs.
-set(TTT2_VERSION "0.1.5")
+set(TTT2_VERSION "2.0.0")
 string(REPLACE "." "," TTT2_VERSION_COMMAS "${TTT2_VERSION},0")
 # Original TTT2 Community Edition mark, shared by the installer and installed game executable.
 set(TTT2_SETUP_ICON "${CMAKE_SOURCE_DIR}/src/setup/ttt2.ico")

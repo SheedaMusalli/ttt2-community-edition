@@ -25,12 +25,14 @@ CHECKER = r'''
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <string>
 #include <thread>
 std::array<bool,256> keys{};
 bool physical[4]{};
 XINPUT_STATE host[4]{};
 XINPUT_CAPABILITIES capabilities[4]{};
 unsigned samples[4]{},capsSamples[4]{};
+std::wstring testLocalAppData;
 bool focused=true,windowExists=true,textEntry=false;
 bool SysUiTextEntryActive() { return textEntry; }
 bool captureActive=false;
@@ -64,6 +66,31 @@ void Reset() {
     }
 }
 int main() {
+    CHECK(NormalizePadPollRateHz(250)==250);
+    CHECK(NormalizePadPollRateHz(500)==500);
+    CHECK(NormalizePadPollRateHz(750)==750);
+    CHECK(NormalizePadPollRateHz(1000)==1000);
+    CHECK(NormalizePadPollRateHz(0)==1000 && NormalizePadPollRateHz(480)==1000);
+    CHECK(PadPollIntervalForHz(250).count()==4000000);
+    CHECK(PadPollIntervalForHz(500).count()==2000000);
+    CHECK(PadPollIntervalForHz(750).count()==1333333);
+    CHECK(PadPollIntervalForHz(1000).count()==1000000);
+    testLocalAppData=L".";
+    DWORD localLength=GetEnvironmentVariableW(L"LOCALAPPDATA",nullptr,0);
+    if(localLength) { std::wstring local(localLength,L'\0');GetEnvironmentVariableW(L"LOCALAPPDATA",local.data(),localLength);local.resize(wcslen(local.c_str()));testLocalAppData=local; }
+    SetEnvironmentVariableW(L"LOCALAPPDATA",testLocalAppData.c_str());
+    const std::wstring configDir=testLocalAppData+L"\\TTT2Recomp";
+    CreateDirectoryW(configDir.c_str(),nullptr);
+    const std::wstring launcherIni=configDir+L"\\launcher.ini";
+    CHECK(WritePrivateProfileStringW(L"Performance",L"InputPollHz",L"750",launcherIni.c_str()));
+    CHECK(ReadPadPollRateHz()==750);
+    CHECK(WritePrivateProfileStringW(L"Performance",L"InputPollHz",L"333",launcherIni.c_str()));
+    CHECK(ReadPadPollRateHz()==1000);
+    CHECK(WritePrivateProfileStringW(L"Controls",L"Player2Keyboard",L"1",launcherIni.c_str()));
+    CHECK(Player2KeyboardEnabled());
+    CHECK(WritePrivateProfileStringW(L"Controls",L"Player2Keyboard",L"0",launcherIni.c_str()));
+    CHECK(!Player2KeyboardEnabled());
+    DeleteFileW(launcherIni.c_str());
     CHECK(!AutoStartEnabled(nullptr));
     for(const char* value : {"", "0", "false", "off", "01", " 1", "1 "}) {
         CHECK(!AutoStartEnabled(value));
@@ -101,12 +128,14 @@ int main() {
     unsigned attempts=0;
     while(!poll.physicalConnected[0] && attempts++<252) PollPadsOnce(poll,false,6000+attempts*8);
     CHECK(poll.physicalConnected[0] && g_pads[0].connected && g_pads[0].physical);
+    CHECK(capsSamples[0]==1); // Capabilities are fetched once when the device connects.
     CHECK(g_pads[0].state.Gamepad.wButtons==0x1010 && g_pads[0].caps.Flags==0x55);
     CHECK(g_pads[0].state.Gamepad.bLeftTrigger==90 && g_pads[0].state.Gamepad.sThumbLX==-1234);
     CHECK(g_pads[0].state.dwPacketNumber!=packet); // Host counter collision cannot hide the handoff.
     packet=g_pads[0].state.dwPacketNumber;
     PollPadsOnce(poll,false,54000); // Keyboard and physical buttons share player 0.
     CHECK(g_pads[0].state.Gamepad.wButtons==0x1010 && g_pads[0].state.dwPacketNumber==packet);
+    CHECK(g_pads[0].caps.Flags==0x55 && capsSamples[0]==1);
     keys[VK_RETURN]=false;PollPadsOnce(poll,false,54000);
     CHECK(g_pads[0].state.Gamepad.wButtons==0x1000 && g_pads[0].state.dwPacketNumber==packet+1);
     packet=g_pads[0].state.dwPacketNumber;
@@ -121,11 +150,14 @@ int main() {
     packet=g_pads[0].state.dwPacketNumber;
     host[0].Gamepad.sThumbLX=-1235;PollPadsOnce(poll,false,7000);
     CHECK(g_pads[0].state.dwPacketNumber==packet+1);
+    CHECK(capsSamples[0]==1); // Steady-state polling avoids redundant capability queries.
     packet=g_pads[0].state.dwPacketNumber;
     physical[0]=false;keys[VK_RETURN]=false;PollPadsOnce(poll,false,7008);
     CHECK(g_pads[0].connected && !g_pads[0].physical && g_pads[0].state.Gamepad.wButtons==0);
     CHECK(g_pads[0].state.Gamepad.bLeftTrigger==0 && g_pads[0].state.Gamepad.sThumbLX==0);
     CHECK(g_pads[0].state.dwPacketNumber==packet+1);
+    physical[0]=true;poll.disconnectedBackoff[0]=0;PollPadsOnce(poll,false,7016);
+    CHECK(capsSamples[0]==2); // Reconnect refreshes capabilities.
 
     // A real pad already present at startup must be found without a keypress.
     Reset();poll={};physical[0]=true;physical[1]=true;
@@ -236,7 +268,7 @@ int main() {
     textEntry=false;PollPadsOnce(poll,false,8);
     CHECK(g_pads[0].state.Gamepad.wButtons==(0x0001|0x0010|0x1000|0x2000));
     // Key settings: the default keys reach every control (E / R triggers, D / F stick clicks), a
-    // new key replaces the old one, a taken key swaps, Space is START only while unbound, and
+    // new key replaces the old one, a taken key swaps, Space has no hidden binding, and
     // nothing is mapped while a key is being chosen.
     textEntry=false;keyboard_keys::RestoreDefaults();
     Reset();poll={};keys['E']=keys['D']=true;PollPadsOnce(poll,false,0);
@@ -246,7 +278,7 @@ int main() {
     CHECK(g_pads[0].state.Gamepad.bRightTrigger==255 && g_pads[0].state.Gamepad.bLeftTrigger==0);
     CHECK(g_pads[0].state.Gamepad.wButtons==0x0080);
     keys['R']=keys['F']=false;keys[VK_SPACE]=true;PollPadsOnce(poll,false,16);
-    CHECK(g_pads[0].state.Gamepad.wButtons==0x0010);
+    CHECK(g_pads[0].state.Gamepad.wButtons==0); // Space has no hidden START binding.
     keyboard_keys::Assign(keyboard_keys::X,'J');
     keys[VK_SPACE]=false;keys['J']=true;PollPadsOnce(poll,false,24);
     CHECK(g_pads[0].state.Gamepad.wButtons==0x4000);
@@ -264,7 +296,21 @@ int main() {
     captureActive=false;CHECK(!keyboard_keys::Assignable(VK_ESCAPE));
     keyboard_keys::RestoreDefaults();
     CHECK(keyboard_keys::Key(keyboard_keys::X)=='Z' && keyboard_keys::Key(keyboard_keys::LB)=='Q');
-    std::printf("PASS %u input checks: focused keyboard/controller combination, hotplug, packet edges, START timing, player 1 = first pad used, text entry, key settings\n",checks);
+    // Optional Player 2 keyboard input is published as guest user 1 and uses its own map.
+    CHECK(keyboard_keys::Key(keyboard_keys::Up,1)=='I' && keyboard_keys::Key(keyboard_keys::A,1)=='U');
+    keyboard_keys::Assign(keyboard_keys::A,'P',1);
+    Reset();poll={};keys['P']=true;PollPadsOnce(poll,false,64,nullptr,true);
+    CHECK(g_pads[1].connected && !g_pads[1].physical && g_pads[1].state.Gamepad.wButtons==0x1000);
+    CHECK(g_pads[0].state.Gamepad.wButtons==0);
+    Reset();poll={};keys['P']=true;PollPadsOnce(poll,false,72,nullptr,false);
+    CHECK(!g_pads[1].connected); // The launcher checkbox gates Player 2 keyboard.
+    keyboard_keys::RestoreDefaults(1);
+    keyboard_keys::Assign(keyboard_keys::LSUp,'I');
+    keyboard_keys::Assign(keyboard_keys::RSLeft,'O');
+    Reset();poll={};keys['I']=keys['O']=true;PollPadsOnce(poll,false,80);
+    CHECK(g_pads[0].state.Gamepad.sThumbLY==32767 && g_pads[0].state.Gamepad.sThumbRX==-32767);
+    keyboard_keys::RestoreDefaults();
+    std::printf("PASS %u input checks: focused keyboard/controller combination, hotplug, packet edges, START timing, player 1 = first pad used, text entry, P1/P2 maps, stick axes, no hidden Space binding\n",checks);
 }
 '''
 
@@ -278,7 +324,7 @@ def main():
         folder = Path(temp)
         source = CHECKER.replace("@KEYS@", keys).replace("@PRODUCTION@", text[begin:end])
         exe = compile_one(folder, "input", source, [kernel])
-        env = dict(os.environ, TTT2_SETTINGS_INI=str(folder / "settings.ini"))
+        env = dict(os.environ, TTT2_SETTINGS_INI=str(folder / "settings.ini"), LOCALAPPDATA=str(folder))
         subprocess.run([str(exe)], check=True, timeout=10, env=env)
 
 

@@ -1,7 +1,8 @@
-// Keyboard key settings for player 1 (port/KEYBOARD_PLAN.md): every controller control has one
-// keyboard key, chosen in Options -> Controller Setup -> KEYBOARD and kept as
+// Keyboard bindings for two local players, kept as
 //   [Keyboard]
 //   Up=0x26 ...           (Windows virtual-key codes; 0 = no key)
+//   [Keyboard2]
+//   Up=0x68 ...
 // in %LOCALAPPDATA%\TTT2Recomp\settings.ini (TTT2_SETTINGS_INI overrides the file, for tests).
 #pragma once
 #include <cstdint>
@@ -9,15 +10,18 @@
 
 namespace keyboard_keys {
 
-enum Control : int { Up, Down, Left, Right, A, B, X, Y, LB, RB, LT, RT, LS, RS, Start, Back, Count };
+enum Control : int {
+    Up, Down, Left, Right, A, B, X, Y, LB, RB, LT, RT, LS, RS, Start, Back,
+    LSUp, LSDown, LSLeft, LSRight, RSUp, RSDown, RSLeft, RSRight, Count
+};
 
-// The control's key (virtual-key code, 0 = none).
-int Key(int control);
+// The control's key (virtual-key code, 0 = unassigned). Player is 0 or 1.
+int Key(int control, int player = 0);
 // Gives `control` the key `vk`; a control that had `vk` takes `control`'s old key. Saved at once.
-void Assign(int control, int vk);
-void RestoreDefaults();
+void Assign(int control, int vk, int player = 0);
+void RestoreDefaults(int player = 0);
 // True when some control has `vk`.
-bool Bound(int vk);
+bool Bound(int vk, int player = 0);
 
 // XInput button mask of a control (0 for the triggers LT / RT).
 uint16_t Mask(int control);

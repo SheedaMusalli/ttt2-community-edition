@@ -53,6 +53,16 @@ Manifests are generated (`setup.manifest.in`) and embedded through the .rc (`/MA
 the Common Controls v6 dependency. /MT: the installer itself needs no redist.
 Version: `TTT2_VERSION` in CMakeLists (VERSIONINFO, Add or remove programs).
 
+The installed launcher includes a controller and keyboard input polling selector under
+**Performance → Controller Input Polling**. It supports 250, 500, 750, and 1000 Hz, saves the
+choice to `%LOCALAPPDATA%\TTT2Recomp\launcher.ini`, and applies it the next time the game starts.
+The launcher also lets players choose overlay metrics under **Advanced → Performance Overlay**.
+The overlay reports presentation rate, recent per-frame timing, CPU/GPU utilization, RAM and GPU
+memory. CPU/GPU temperature entries depend on a Windows sensor source and can display unavailable.
+The runtime currently has a D3D11 hardware renderer and software fallback; it does not contain
+Direct3D 12 or Vulkan render backends. Shader warming at startup only prepares shaders cached from
+previous gameplay, because uncaptured stage microcode cannot be compiled in advance.
+
 ## Test
 
     ttt2_setup_probe.exe /silent "<disc.iso>" "<TU file or folder>" "D:\ttt2_install_test\Tekken Tag Tournament 2"

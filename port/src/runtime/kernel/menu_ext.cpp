@@ -729,9 +729,10 @@ const std::string kMenu = "MenuMode007-03-01-1", kValue = "StaticTextMenuItemMod
                   kHelp = "StaticTextMode007-03-02-1";
 // Panel slot StaticTextMode007-03-SS-1-1 (SS = 01..10): the left column top down, then the right
 // (MEASURED on screen 2026-10-14). Slot = column * 5 + row.
-const int kPage[2][10] = {
+const int kPage[3][10] = {
     { LB, LT, X, A, LS, RB, RT, Y, B, RS },
     { Up, Down, Left, Right, kNone, Start, Back, kNone, kNone, kDefaults },
+    { LSUp, LSDown, LSLeft, LSRight, RSUp, RSDown, RSLeft, RSRight, kNone, kDefaults },
 };
 
 struct State
@@ -792,7 +793,7 @@ std::string SlotText(const State& st, int slot)
     if (control == kDefaults) return "~white~ " + colour + "DEFAULTS";
     const bool asking = st.capturing && selected;
     const std::string key = asking ? std::string("PRESS A KEY") : ShortKeyName(Key(control));
-    if (st.page == 1)
+    if (st.page != 0)
         return asking ? "~white~ " + colour + key : std::string("~white~") + ControlName(control) + " " + colour + key;
     const std::string& game = st.gameText[slot];
     const size_t at = game.find("~default~");
@@ -892,7 +893,7 @@ void Edit(PPCContext& ctx, uint8_t* base, State& st, uint16_t pressed, bool esc)
     }
     if (pressed & (kPadLB | kPadRB))
     {
-        st.page ^= 1;
+        st.page = (st.page + 1) % 3;
         st.slot = 0;
         MenuSound(ctx, base, kSoundCursor);
         return;

@@ -23,9 +23,21 @@ const Info kInfo[Count] = {
     { "LT", "LT", 0, 'E' },                 { "RT", "RT", 0, 'R' },
     { "LS", "LS", 0x0040, 'D' },            { "RS", "RS", 0x0080, 'F' },
     { "Start", "START", 0x0010, VK_RETURN }, { "Back", "BACK", 0x0020, VK_BACK },
+    { "LSUp", "LS UP", 0, 0 }, { "LSDown", "LS DOWN", 0, 0 },
+    { "LSLeft", "LS LEFT", 0, 0 }, { "LSRight", "LS RIGHT", 0, 0 },
+    { "RSUp", "RS UP", 0, 0 }, { "RSDown", "RS DOWN", 0, 0 },
+    { "RSLeft", "RS LEFT", 0, 0 }, { "RSRight", "RS RIGHT", 0, 0 },
 };
+const int kPlayer2Defaults[Count] = {
+    'I','K','J','L','U','O','N','M','Y','H','7','8','5','6',VK_NUMPAD0,VK_DECIMAL,
+    0,0,0,0,0,0,0,0,
+};
+int DefaultKey(int control, int player)
+{
+    return player == 1 ? kPlayer2Defaults[control] : kInfo[control].defaultKey;
+}
 
-std::atomic<int> g_keys[Count];
+std::atomic<int> g_keys[2][Count];
 std::once_flag g_loaded;
 std::mutex g_writeMutex;
 
@@ -44,20 +56,24 @@ void Load()
 {
     std::call_once(g_loaded, [] {
         const std::string ini = IniPath();
+        for (int p = 0; p < 2; ++p)
         for (int c = 0; c < Count; ++c)
         {
             char value[32] = {};
-            GetPrivateProfileStringA("Keyboard", kInfo[c].ini, "", value, sizeof(value), ini.c_str());
-            int vk = kInfo[c].defaultKey;
+            const char* section = p == 0 ? "Keyboard" : "Keyboard2";
+            GetPrivateProfileStringA(section, kInfo[c].ini, "", value, sizeof(value), ini.c_str());
+            int vk = DefaultKey(c, p);
             if (*value) vk = int(std::strtol(value, nullptr, 0));
-            g_keys[c] = (vk >= 0 && vk < 256) ? vk : kInfo[c].defaultKey;
+            g_keys[p][c] = (vk >= 0 && vk < 256) ? vk : DefaultKey(c, p);
         }
-        // Two controls on one key (an edited file): the later one loses the key.
+        // Duplicate keys in one player's map are resolved deterministically. Players may
+        // intentionally use identical keys across their separate maps.
+        for (int p = 0; p < 2; ++p)
         for (int c = 0; c < Count; ++c)
             for (int d = 0; d < c; ++d)
-                if (g_keys[c] && g_keys[c] == g_keys[d]) g_keys[c] = 0;
-        std::string line = "[keyboard] keys:";
-        for (int c = 0; c < Count; ++c) line += std::string(" ") + kInfo[c].name + "=" + KeyName(g_keys[c]);
+                if (g_keys[p][c] && g_keys[p][c] == g_keys[p][d]) g_keys[p][c] = 0;
+        std::string line = "[keyboard] player 1 keys:";
+        for (int c = 0; c < Count; ++c) line += std::string(" ") + kInfo[c].name + "=" + KeyName(g_keys[0][c]);
         std::fprintf(stderr, "%s (%s)\n", line.c_str(), ini.c_str());
     });
 }
@@ -68,46 +84,50 @@ void Save()
     for (int c = 0; c < Count; ++c)
     {
         char value[16];
-        std::snprintf(value, sizeof(value), "0x%02X", unsigned(g_keys[c].load()));
+        std::snprintf(value, sizeof(value), "0x%02X", unsigned(g_keys[0][c].load()));
         WritePrivateProfileStringA("Keyboard", kInfo[c].ini, value, ini.c_str());
+        std::snprintf(value, sizeof(value), "0x%02X", unsigned(g_keys[1][c].load()));
+        WritePrivateProfileStringA("Keyboard2", kInfo[c].ini, value, ini.c_str());
     }
 }
 
 } // namespace
 
-int Key(int control)
+int Key(int control, int player)
 {
     Load();
-    return control >= 0 && control < Count ? g_keys[control].load() : 0;
+    return player >= 0 && player < 2 && control >= 0 && control < Count ? g_keys[player][control].load() : 0;
 }
 
-bool Bound(int vk)
+bool Bound(int vk, int player)
 {
     Load();
+    if (player < 0 || player >= 2) return false;
     for (int c = 0; c < Count; ++c)
-        if (vk && g_keys[c].load() == vk) return true;
+        if (vk && g_keys[player][c].load() == vk) return true;
     return false;
 }
 
-void Assign(int control, int vk)
+void Assign(int control, int vk, int player)
 {
     Load();
-    if (control < 0 || control >= Count || !Assignable(vk)) return;
+    if (player < 0 || player >= 2 || control < 0 || control >= Count || !Assignable(vk)) return;
     std::lock_guard<std::mutex> l(g_writeMutex);
-    const int old = g_keys[control].load();
+    const int old = g_keys[player][control].load();
     if (old == vk) return;
     for (int c = 0; c < Count; ++c)
-        if (c != control && g_keys[c].load() == vk) g_keys[c] = old;      // swap
-    g_keys[control] = vk;
+        if (c != control && g_keys[player][c].load() == vk) g_keys[player][c] = old; // swap
+    g_keys[player][control] = vk;
     Save();
-    std::fprintf(stderr, "[keyboard] %s = %s\n", kInfo[control].name, KeyName(vk).c_str());
+    std::fprintf(stderr, "[keyboard] player %d %s = %s\n", player + 1, kInfo[control].name, KeyName(vk).c_str());
 }
 
-void RestoreDefaults()
+void RestoreDefaults(int player)
 {
     Load();
+    if (player < 0 || player >= 2) return;
     std::lock_guard<std::mutex> l(g_writeMutex);
-    for (int c = 0; c < Count; ++c) g_keys[c] = kInfo[c].defaultKey;
+    for (int c = 0; c < Count; ++c) g_keys[player][c] = DefaultKey(c, player);
     Save();
     std::fprintf(stderr, "[keyboard] default keys restored\n");
 }

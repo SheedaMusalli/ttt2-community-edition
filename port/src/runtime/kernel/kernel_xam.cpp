@@ -486,8 +486,8 @@ PPC_FUNC(__imp__ExRegisterTitleTerminateNotification)
 // IMPORTANT: the guest polls input from inside a critical section its main loop also
 // takes, and host XInputGetState/GetCapabilities on DISCONNECTED pads can each take
 // hundreds of ms (driver enumeration) - calling them inline throttled the entire game
-// loop to ~0.5 Hz. A host poll thread keeps a snapshot (connected pads every ~8 ms,
-// disconnected retried every ~2 s per XInput guidance); guest calls read it instantly.
+// loop to ~0.5 Hz. A host poll thread keeps a snapshot (connected pads every 1 ms,
+// disconnected retried every ~250 ms); guest calls read it instantly.
 #pragma comment(lib, "xinput9_1_0.lib")
 
 namespace {
@@ -499,17 +499,60 @@ struct PadSnapshot
     XINPUT_CAPABILITIES caps{};
     bool physical = false; // protected by m; separate from logical connected state
 };
+// Polling cadence is user-selectable in the launcher and shared through launcher.ini.
+// Absolute deadlines prevent per-iteration work time from accumulating into input latency.
+unsigned NormalizePadPollRateHz(unsigned hz)
+{
+    switch (hz)
+    {
+    case 250: case 500: case 750: case 1000: return hz;
+    default: return 1000;
+    }
+}
+
+std::chrono::nanoseconds PadPollIntervalForHz(unsigned hz)
+{
+    return std::chrono::nanoseconds(1'000'000'000LL / NormalizePadPollRateHz(hz));
+}
+
+unsigned ReadPadPollRateHz()
+{
+    wchar_t localAppData[MAX_PATH]{};
+    const DWORD length = GetEnvironmentVariableW(L"LOCALAPPDATA", localAppData, MAX_PATH);
+    if (!length || length >= MAX_PATH)
+        return 1000;
+    std::wstring path(localAppData);
+    path += L"\\TTT2Recomp\\launcher.ini";
+    return NormalizePadPollRateHz(static_cast<unsigned>(
+        GetPrivateProfileIntW(L"Performance", L"InputPollHz", 1000, path.c_str())));
+}
+
 PadSnapshot g_pads[4];
 std::atomic<bool> g_padThreadStarted{false};
+
+bool Player2KeyboardEnabled()
+{
+    wchar_t localAppData[MAX_PATH]{};
+    const DWORD length = GetEnvironmentVariableW(L"LOCALAPPDATA", localAppData, MAX_PATH);
+    if (!length || length >= MAX_PATH) return false;
+    std::wstring path(localAppData);
+    path += L"\\TTT2Recomp\\launcher.ini";
+    return GetPrivateProfileIntW(L"Controls", L"Player2Keyboard", 0, path.c_str()) != 0;
+}
 
 // Keyboard controls augment player 0 even when a controller is connected. Physical
 // analog controls remain intact. Only accept keys while our game is foreground,
 // so typing in another application cannot operate the game.
 // Every control has the key chosen in Controller Setup -> KEYBOARD (keyboard_keys.h; by default
 // arrows = D-pad, A/S/Z/X = A/B/X/Y, Q/W = shoulders, E/R = triggers, D/F = stick clicks,
-// Enter = START, Backspace = BACK); Space is an extra START while no control has it.
-struct KeyboardPad { uint16_t buttons = 0; bool leftTrigger = false, rightTrigger = false; };
-static KeyboardPad ReadKeyboardPad()
+// Enter = START, Backspace = BACK). Stick direction axes have their own optional bindings.
+struct KeyboardPad
+{
+    uint16_t buttons = 0;
+    bool leftTrigger = false, rightTrigger = false;
+    SHORT leftX = 0, leftY = 0, rightX = 0, rightY = 0;
+};
+static KeyboardPad ReadKeyboardPad(int player = 0)
 {
     KeyboardPad pad;
     DWORD foregroundProcess = 0;
@@ -519,7 +562,7 @@ static KeyboardPad ReadKeyboardPad()
     if (foregroundProcess != GetCurrentProcessId()) return pad;
     auto down = [](int vk) { return vk && (GetAsyncKeyState(vk) & 0x8000) != 0; };
     if (SysUiKeyCaptureActive()) return pad;              // the keys are being chosen
-    if (SysUiTextEntryActive())
+    if (player == 0 && SysUiTextEntryActive())
     {
         // Name entry takes typed characters (WM_CHAR); only the arrows still steer.
         if (down(VK_UP))    pad.buttons |= 0x0001;
@@ -530,18 +573,26 @@ static KeyboardPad ReadKeyboardPad()
     }
     for (int c = 0; c < keyboard_keys::Count; ++c)
     {
-        if (!down(keyboard_keys::Key(c))) continue;
+        if (!down(keyboard_keys::Key(c, player))) continue;
         pad.buttons |= keyboard_keys::Mask(c);
         pad.leftTrigger |= c == keyboard_keys::LT;
         pad.rightTrigger |= c == keyboard_keys::RT;
+        if (c == keyboard_keys::LSLeft) pad.leftX -= 32767;
+        if (c == keyboard_keys::LSRight) pad.leftX += 32767;
+        if (c == keyboard_keys::LSUp) pad.leftY += 32767;
+        if (c == keyboard_keys::LSDown) pad.leftY -= 32767;
+        if (c == keyboard_keys::RSLeft) pad.rightX -= 32767;
+        if (c == keyboard_keys::RSRight) pad.rightX += 32767;
+        if (c == keyboard_keys::RSUp) pad.rightY += 32767;
+        if (c == keyboard_keys::RSDown) pad.rightY -= 32767;
     }
-    if (down(VK_SPACE) && !keyboard_keys::Bound(VK_SPACE)) pad.buttons |= 0x0010;
     return pad;
 }
 
 struct PadPollState
 {
     bool physicalConnected[4]{};
+    XINPUT_CAPABILITIES physicalCaps[4]{};
     unsigned disconnectedBackoff[4]{};
     bool keyboardEverPressed = false;
     // Host pad -> guest user, -1 until the pad is first used. A pad claims the lowest user no
@@ -683,13 +734,15 @@ void PublishPad(DWORD index, bool connected, bool physical,
     pad.connected.store(connected);
 }
 
-void PollPadsOnce(PadPollState& polling, bool autoStart, uint64_t elapsedMs, PadScript* script = nullptr)
+void PollPadsOnce(PadPollState& polling, bool autoStart, uint64_t elapsedMs, PadScript* script = nullptr,
+                  bool player2KeyboardEnabled = false)
 {
     // AUTOSTART is an explicit unattended test mode. Apply its START pulse to
     // controller 0 even when a physical pad is present or the window is inactive.
     const bool startPulse = autoStart && elapsedMs > 45000 && (elapsedMs % 9000) < 300;
     // Scripted presses join the keyboard's (controller 0, foreground not required).
     const KeyboardPad keyboard = ReadKeyboardPad();
+    const KeyboardPad player2Keyboard = player2KeyboardEnabled ? ReadKeyboardPad(1) : KeyboardPad{};
     const uint16_t keyboardButtons = keyboard.buttons | (script ? ScriptButtons(*script, elapsedMs) : 0);
     const uint16_t player2Buttons = script ? ScriptButtons(*script, elapsedMs, 1) : 0;
     if (script && script->active) autoStart = true;        // keep pad 0 connected for the script
@@ -704,14 +757,18 @@ void PollPadsOnce(PadPollState& polling, bool autoStart, uint64_t elapsedMs, Pad
         {
             if (XInputGetState(i, &sampled[i]) == ERROR_SUCCESS)
             {
-                XInputGetCapabilities(i, 0, &hostCaps[i]);
+                // Capabilities do not change per frame. Query only on connect/reconnect;
+                // otherwise a 1 kHz poll would call this slower API 4,000 times/s.
+                if (!polling.physicalConnected[i])
+                    XInputGetCapabilities(i, 0, &polling.physicalCaps[i]);
+                hostCaps[i] = polling.physicalCaps[i];
                 polling.physicalConnected[i] = true;
                 polling.disconnectedBackoff[i] = 0;
                 continue;
             }
             sampled[i] = {};
             polling.physicalConnected[i] = false;
-            polling.disconnectedBackoff[i] = 250; // retry physical discovery in ~2 s
+            polling.disconnectedBackoff[i] = 250; // retry physical discovery in ~250 ms
         }
         else --polling.disconnectedBackoff[i];
     }
@@ -762,6 +819,22 @@ void PollPadsOnce(PadPollState& polling, bool autoStart, uint64_t elapsedMs, Pad
                 caps.SubType = XINPUT_DEVSUBTYPE_GAMEPAD;
             }
         }
+        if (user == 1 && player2KeyboardEnabled)
+        {
+            state.Gamepad.wButtons |= player2Keyboard.buttons;
+            state.Gamepad.bLeftTrigger = (std::max)(state.Gamepad.bLeftTrigger,
+                static_cast<BYTE>(player2Keyboard.leftTrigger ? 255 : 0));
+            state.Gamepad.bRightTrigger = (std::max)(state.Gamepad.bRightTrigger,
+                static_cast<BYTE>(player2Keyboard.rightTrigger ? 255 : 0));
+            if (player2Keyboard.leftX) state.Gamepad.sThumbLX = player2Keyboard.leftX;
+            if (player2Keyboard.leftY) state.Gamepad.sThumbLY = player2Keyboard.leftY;
+            if (player2Keyboard.rightX) state.Gamepad.sThumbRX = player2Keyboard.rightX;
+            if (player2Keyboard.rightY) state.Gamepad.sThumbRY = player2Keyboard.rightY;
+            caps.Gamepad.wButtons |= 0xF3FF;
+            caps.Gamepad.bLeftTrigger = caps.Gamepad.bRightTrigger = 255;
+            connected = true; // enabling Player 2 deliberately exposes guest user 1 as a pad
+            if (!physical) { caps.Type = XINPUT_DEVTYPE_GAMEPAD; caps.SubType = XINPUT_DEVSUBTYPE_GAMEPAD; }
+        }
         if (user == 0)
         {
             uint16_t buttons = keyboardButtons;
@@ -771,6 +844,10 @@ void PollPadsOnce(PadPollState& polling, bool autoStart, uint64_t elapsedMs, Pad
             state.Gamepad.wButtons |= buttons;
             if (keyboard.leftTrigger) state.Gamepad.bLeftTrigger = 255;
             if (keyboard.rightTrigger) state.Gamepad.bRightTrigger = 255;
+            if (keyboard.leftX) state.Gamepad.sThumbLX = keyboard.leftX;
+            if (keyboard.leftY) state.Gamepad.sThumbLY = keyboard.leftY;
+            if (keyboard.rightX) state.Gamepad.sThumbRX = keyboard.rightX;
+            if (keyboard.rightY) state.Gamepad.sThumbRY = keyboard.rightY;
             caps.Gamepad.wButtons |= 0xF3FF; // supported mapped controls, independent of current presses
             caps.Gamepad.bLeftTrigger = caps.Gamepad.bRightTrigger = 255;
             if (!physical)
@@ -796,16 +873,27 @@ void PadPollThread()
 {
     PadPollState polling;
     const bool autoStart = AutoStartEnabled(std::getenv("TTT2_AUTOSTART"));
-    std::fprintf(stderr, "[input] automatic Start %s\n", autoStart ? "enabled" : "disabled");
+    const unsigned pollRateHz = ReadPadPollRateHz();
+    const auto pollInterval = PadPollIntervalForHz(pollRateHz);
+    std::fprintf(stderr, "[input] automatic Start %s; host polling at %u Hz (%lld ns interval)\n",
+                 autoStart ? "enabled" : "disabled", pollRateHz,
+                 static_cast<long long>(pollInterval.count()));
     PadScript script;
     LoadScript(script, std::getenv("TTT2_INPUT_SCRIPT"));
+    const bool player2KeyboardEnabled = Player2KeyboardEnabled();
+    std::fprintf(stderr, "[input] player 2 keyboard %s\n", player2KeyboardEnabled ? "enabled" : "disabled");
     const auto started = std::chrono::steady_clock::now();
+    auto nextPoll = started;
     for (;;)
     {
         const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - started).count();
-        PollPadsOnce(polling, autoStart, uint64_t(elapsed), &script);
-        std::this_thread::sleep_for(std::chrono::milliseconds(8));
+        PollPadsOnce(polling, autoStart, uint64_t(elapsed), &script, player2KeyboardEnabled);
+        nextPoll += pollInterval;
+        std::this_thread::sleep_until(nextPoll);
+        const auto now = std::chrono::steady_clock::now();
+        if (now > nextPoll + pollInterval)
+            nextPoll = now; // Never run catch-up bursts after a slow host poll.
     }
 }
 

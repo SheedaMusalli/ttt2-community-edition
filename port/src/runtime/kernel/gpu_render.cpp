@@ -1356,13 +1356,18 @@ void RunShader(ShaderCtx& sc, const std::vector<uint32_t>& code)
     }
 }
 
+void LoadUcode(const GpuShader& s, std::vector<uint32_t>& code)
+{
+    if (!s.addr || !s.size || s.size > 8192) { code.clear(); return; }
+    code.resize(s.size);
+    for (uint32_t i = 0; i < s.size; ++i) code[i] = GRead32(g_base, s.addr + i * 4);
+}
+
 std::vector<uint32_t> LoadUcode(const GpuShader& s)
 {
-    std::vector<uint32_t> v;
-    if (!s.addr || !s.size || s.size > 8192) return v;
-    v.resize(s.size);
-    for (uint32_t i = 0; i < s.size; ++i) v[i] = GRead32(g_base, s.addr + i * 4);
-    return v;
+    std::vector<uint32_t> code;
+    LoadUcode(s, code);
+    return code;
 }
 
 // --------------------------------------------------------------------------------------
@@ -1548,7 +1553,14 @@ bool GpuExecuteDraw(const uint32_t* regs, uint32_t initiator, uint32_t indexAddr
                prim == PRIM_QUAD_LIST;
     if (prim != PRIM_RECT_LIST && !tri) return false;             // points and lines: later
 
-    std::vector<uint32_t> vsCode = LoadUcode(vsRef), psCode = LoadUcode(psRef);
+    // The command processor calls this once per draw. Reuse its microcode and index buffers so
+    // ordinary draws do not repeatedly allocate/free several vectors on the frame-critical
+    // thread. Shader contents are still read from guest memory on each draw, preserving support
+    // for guest code that rewrites a microcode address at runtime.
+    thread_local std::vector<uint32_t> vsCode, psCode, idx;
+    thread_local std::vector<uint8_t> cut;
+    LoadUcode(vsRef, vsCode);
+    LoadUcode(psRef, psCode);
     if (vsCode.empty()) return false;
 #if defined(TTT2_DRAW_CAPTURE_DIAGNOSTICS)
     GpuDrawProfileScope drawProfile(psCode.data(), psCode.size(), prim, numIdx);
@@ -1572,8 +1584,9 @@ bool GpuExecuteDraw(const uint32_t* regs, uint32_t initiator, uint32_t indexAddr
     const uint32_t indexOffset = regs[0x2102];
     const uint32_t minIndex = regs[0x2101] & 0xFFFFFF, maxIndex = regs[0x2100] & 0xFFFFFF;
     const bool clampIndex = maxIndex != 0 && maxIndex >= minIndex;
-    std::vector<uint32_t> idx(numIdx);
-    std::vector<uint8_t> cut(numIdx, 0);
+    idx.resize(numIdx);
+    cut.resize(numIdx);
+    std::fill(cut.begin(), cut.end(), 0);
     bool anyCut = false;
     for (uint32_t i = 0; i < numIdx; ++i)
     {
@@ -1591,6 +1604,110 @@ bool GpuExecuteDraw(const uint32_t* regs, uint32_t initiator, uint32_t indexAddr
     uint32_t maxIdx = 0;
     for (uint32_t i = 0; i < numIdx; ++i) if (!cut[i]) maxIdx = std::max(maxIdx, idx[i]);
     if (maxIdx > (1u << 20)) return false;
+
+#if defined(TTT2_GPU_HW_BACKEND)
+    // Fast path for the D3D11 backend: assemble the guest primitive indices and run supported
+    // vertex shaders directly on the GPU before invoking the CPU interpreter. The older path
+    // shaded every distinct vertex on the CPU first, then repeated that work on the GPU for
+    // supported shaders. That duplicate work is especially costly in Tag Assault, where a draw
+    // can contain thousands of skinned vertices. Unsupported or not-yet-ready shaders retain
+    // the established CPU fallback below.
+    if (ttt2_hw::ActiveMode() == ttt2_hw::Mode::On && prim != PRIM_RECT_LIST && !g_gpuFrameNote)
+    {
+        thread_local std::vector<uint32_t> fastTriangles;
+        fastTriangles.clear();
+        auto emitFast = [&](uint32_t a, uint32_t b, uint32_t c) {
+            fastTriangles.push_back(idx[a]);
+            fastTriangles.push_back(idx[b]);
+            fastTriangles.push_back(idx[c]);
+        };
+        if (prim == PRIM_TRI_LIST)
+        {
+            for (uint32_t i = 0; i + 2 < numIdx; i += 3)
+                if (!(cut[i] | cut[i + 1] | cut[i + 2])) emitFast(i, i + 1, i + 2);
+        }
+        else if (prim == PRIM_TRI_STRIP || prim == PRIM_TRI_FAN)
+        {
+            for (uint32_t s = 0; s < numIdx;)
+            {
+                if (cut[s]) { ++s; continue; }
+                uint32_t e = s;
+                while (e < numIdx && !cut[e]) ++e;
+                if (prim == PRIM_TRI_STRIP)
+                    for (uint32_t i = s; i + 2 < e; ++i)
+                    {
+                        if ((i - s) & 1) emitFast(i + 1, i, i + 2);
+                        else             emitFast(i, i + 1, i + 2);
+                    }
+                else
+                    for (uint32_t i = s + 1; i + 1 < e; ++i) emitFast(s, i, i + 1);
+                s = e;
+            }
+        }
+        else if (prim == PRIM_QUAD_LIST)
+        {
+            for (uint32_t i = 0; i + 3 < numIdx; i += 4)
+            {
+                if (cut[i] | cut[i + 1] | cut[i + 2] | cut[i + 3]) continue;
+                emitFast(i, i + 1, i + 2);
+                emitFast(i, i + 2, i + 3);
+            }
+        }
+
+        if (!fastTriangles.empty())
+        {
+            ttt2_hw::Backend::VsEntry* fastVs = nullptr;
+            ttt2_hw::Guarded("vs", [&] { fastVs = ttt2_hw::Get().VertexShader(vsCode); });
+            if (fastVs)
+            {
+                uint32_t lowest = 0xFFFFFFFFu, highest = 0;
+                for (uint32_t v : fastTriangles)
+                {
+                    lowest = std::min(lowest, v);
+                    highest = std::max(highest, v);
+                }
+                const uint32_t blend = regs[0x2201];
+                const uint32_t depthCtl = regs[0x2200];
+                const uint32_t colorCtl = regs[0x2202];
+                ttt2_hw::DrawState state;
+                state.pitch = pitch; state.sampX = sampX; state.sampY = sampY;
+                state.colorBase = colorBase | (((regs[0x2001] >> 16) & 0xFu) << 12);
+                state.depthBase = regs[0x2002] & 0xFFF; state.writeMask = writeMask;
+                state.zEnable = ((depthCtl >> 1) & 1) != 0;
+                state.zWrite = state.zEnable && ((depthCtl >> 2) & 1) != 0;
+                state.zFunc = (depthCtl >> 4) & 7; state.blend = blend;
+                for (int i = 0; i < 4; ++i) state.blendConst[i] = AsFloat(regs[0x2105 + i]);
+                const uint32_t scTL = regs[0x2081], scBR = regs[0x2082];
+                const int tlX = int(scTL & 0x3FFF), tlY = int((scTL >> 16) & 0x3FFF);
+                const int brX = int(scBR & 0x3FFF), brY = int((scBR >> 16) & 0x3FFF);
+                state.scX0 = 0; state.scY0 = 0; state.scX1 = int(pitch); state.scY1 = 2047;
+                if (brX > tlX && brY > tlY)
+                {
+                    state.scX0 = std::max(state.scX0, tlX); state.scY0 = std::max(state.scY0, tlY);
+                    state.scX1 = std::min(state.scX1, brX); state.scY1 = std::min(state.scY1, brY);
+                }
+                state.alphaTest = ((colorCtl >> 3) & 1) != 0;
+                state.alphaFunc = colorCtl & 7; state.alphaRef = AsFloat(regs[0x210E]);
+                state.cull = regs[0x2205] & 3; state.frontIsCW = ((regs[0x2205] >> 2) & 1) != 0;
+                state.depthClip = (regs[0x2204] & 0x10000u) == 0;
+                state.stencil = (depthCtl & 1) != 0; state.depthCtl = depthCtl;
+                state.stencilRefMask = regs[0x210D]; state.stencilRefMaskBf = regs[0x210C];
+
+                ttt2_hw::Backend::GpuVsResult result = ttt2_hw::Backend::GpuVsResult::Fallback;
+                ttt2_hw::Guarded("draw", [&] {
+                    result = ttt2_hw::Get().DrawGpuVs(regs, psCode, *fastVs, fastTriangles,
+                                                      lowest, highest, state);
+                });
+                if (result != ttt2_hw::Backend::GpuVsResult::Fallback)
+                {
+                    if (LogOn() || LogPrimOn(prim)) { LogUsed(); LogPrimUsed(prim); }
+                    ++g_litDraws;
+                    return true;
+                }
+            }
+        }
+    }
+#endif
 
     uint32_t vte = regs[0x2206];
     float xs = AsFloat(regs[0x210F]), xo = AsFloat(regs[0x2110]);
@@ -2495,6 +2612,21 @@ int GpuHwMode()
     return (int)ttt2_hw::ActiveMode();
 #else
     return 0;
+#endif
+}
+
+void GpuHwReadMemoryUsage(uint64_t* usage, uint64_t* budget)
+{
+    if (usage) *usage = 0;
+    if (budget) *budget = 0;
+#if defined(TTT2_GPU_HW_BACKEND)
+    if (!usage || !budget || !GpuHwMode()) return;
+    uint64_t current = 0, limit = 0;
+    if (ttt2_hw::Get().ReadLocalVideoMemory(current, limit))
+    {
+        *usage = current;
+        *budget = limit;
+    }
 #endif
 }
 

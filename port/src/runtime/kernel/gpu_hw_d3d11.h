@@ -21,6 +21,7 @@
 #include <d3d11_1.h>
 #include <d3d11_4.h>
 #include <dxgi1_2.h>
+#include <dxgi1_4.h>
 #include <d3dcompiler.h>
 #include <wrl/client.h>
 #include <array>
@@ -91,6 +92,118 @@ inline Mode RequestedMode()
 }
 inline std::atomic<bool> g_failed{ false };
 inline Mode ActiveMode() { return g_failed.load(std::memory_order_relaxed) ? Mode::Off : RequestedMode(); }
+
+struct ShaderWarmupProgress
+{
+    HWND window = nullptr;
+    size_t done = 0, total = 0;
+    double etaSeconds = 0;
+};
+inline ShaderWarmupProgress g_shaderWarmupProgress;
+
+inline LRESULT CALLBACK ShaderWarmupWindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam)
+{
+    if (message == WM_ERASEBKGND) return 1;
+    if (message == WM_PAINT)
+    {
+        PAINTSTRUCT paint{};
+        HDC dc = BeginPaint(window, &paint);
+        RECT area{};
+        GetClientRect(window, &area);
+        HBRUSH background = CreateSolidBrush(RGB(16, 21, 28));
+        FillRect(dc, &area, background);
+        DeleteObject(background);
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, RGB(240, 244, 249));
+        HFONT heading = CreateFontW(23, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                                    OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                                    DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+        HGDIOBJ oldFont = SelectObject(dc, heading);
+        TextOutW(dc, 24, 20, L"Preparing cached shaders", 24);
+        SelectObject(dc, GetStockObject(DEFAULT_GUI_FONT));
+        DeleteObject(heading);
+
+        wchar_t detail[160]{};
+        swprintf_s(detail, L"%zu of %zu known shader variants   |   ETA %.0f sec",
+                   g_shaderWarmupProgress.done, g_shaderWarmupProgress.total,
+                   g_shaderWarmupProgress.etaSeconds);
+        SetTextColor(dc, RGB(171, 190, 208));
+        TextOutW(dc, 26, 66, detail, static_cast<int>(wcslen(detail)));
+
+        RECT bar{ 24, 108, area.right - 24, 128 };
+        HBRUSH track = CreateSolidBrush(RGB(38, 49, 63));
+        FillRect(dc, &bar, track);
+        DeleteObject(track);
+        const double fraction = g_shaderWarmupProgress.total
+            ? (std::min)(1.0, double(g_shaderWarmupProgress.done) / double(g_shaderWarmupProgress.total)) : 1.0;
+        RECT fill = bar;
+        fill.right = fill.left + LONG(double(fill.right - fill.left) * fraction);
+        HBRUSH accent = CreateSolidBrush(RGB(65, 220, 190));
+        FillRect(dc, &fill, accent);
+        DeleteObject(accent);
+        SelectObject(dc, oldFont);
+        EndPaint(window, &paint);
+        return 0;
+    }
+    if (message == WM_CLOSE) return 0; // warm-up must finish before the game submits its first frame
+    if (message == WM_NCDESTROY && g_shaderWarmupProgress.window == window)
+        g_shaderWarmupProgress.window = nullptr;
+    return DefWindowProcW(window, message, wParam, lParam);
+}
+
+inline HWND CreateShaderWarmupWindow(size_t total, HWND parent)
+{
+    static std::once_flag registered;
+    std::call_once(registered, [] {
+        WNDCLASSW wc{};
+        wc.lpfnWndProc = ShaderWarmupWindowProc;
+        wc.hInstance = GetModuleHandleW(nullptr);
+        wc.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32514));
+        wc.lpszClassName = L"TTT2ShaderWarmupWindow";
+        RegisterClassW(&wc);
+    });
+    RECT anchor{};
+    if (!parent || !GetWindowRect(parent, &anchor))
+    {
+        anchor.left = 0; anchor.top = 0;
+        anchor.right = GetSystemMetrics(SM_CXSCREEN); anchor.bottom = GetSystemMetrics(SM_CYSCREEN);
+    }
+    constexpr int width = 470, height = 166;
+    g_shaderWarmupProgress = { nullptr, 0, total, 0 };
+    HWND window = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, L"TTT2ShaderWarmupWindow",
+                                  L"TTT2 Community Edition - Shader Preparation",
+                                  WS_POPUP | WS_CAPTION | WS_VISIBLE,
+                                  anchor.left + ((anchor.right - anchor.left) - width) / 2,
+                                  anchor.top + ((anchor.bottom - anchor.top) - height) / 2,
+                                  width, height, parent, nullptr, GetModuleHandleW(nullptr), nullptr);
+    g_shaderWarmupProgress.window = window;
+    if (window) { UpdateWindow(window); SetForegroundWindow(window); }
+    return window;
+}
+
+inline void UpdateShaderWarmupWindow(size_t done, size_t total, double etaSeconds)
+{
+    g_shaderWarmupProgress.done = done;
+    g_shaderWarmupProgress.total = total;
+    g_shaderWarmupProgress.etaSeconds = etaSeconds;
+    if (g_shaderWarmupProgress.window)
+    {
+        InvalidateRect(g_shaderWarmupProgress.window, nullptr, FALSE);
+        UpdateWindow(g_shaderWarmupProgress.window);
+        MSG message{};
+        while (PeekMessageW(&message, g_shaderWarmupProgress.window, 0, 0, PM_REMOVE))
+        {
+            TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
+    }
+}
+
+inline void DestroyShaderWarmupWindow()
+{
+    if (g_shaderWarmupProgress.window) DestroyWindow(g_shaderWarmupProgress.window);
+    g_shaderWarmupProgress.window = nullptr;
+}
 
 // ---------------------------------------------------------------------------------------
 // Write-watch based dirty tracking. Every Sync consumes the OS write-watch bits of a range
@@ -1401,6 +1514,20 @@ private:
 public:
     // Device-removed diagnostics for the failure log (DXGI reason code).
     HRESULT RemovedReason() const { return device_ ? device_->GetDeviceRemovedReason() : S_OK; }
+    bool ReadLocalVideoMemory(uint64_t& usage, uint64_t& budget) const
+    {
+        if (!device_) return false;
+        ComPtr<IDXGIDevice> dxgiDevice;
+        ComPtr<IDXGIAdapter> adapter;
+        ComPtr<IDXGIAdapter3> adapter3;
+        if (FAILED(device_.As(&dxgiDevice)) || FAILED(dxgiDevice->GetAdapter(&adapter)) ||
+            FAILED(adapter.As(&adapter3))) return false;
+        DXGI_QUERY_VIDEO_MEMORY_INFO info{};
+        if (FAILED(adapter3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &info))) return false;
+        usage = info.CurrentUsage;
+        budget = info.Budget;
+        return true;
+    }
 private:
     // Per-format upload accounting (format -> {uploads, bytes}) and writeback causes, reported
     // with the periodic stats so the next fast path is chosen from measured data.
@@ -1956,48 +2083,73 @@ private:
     {
         if (shaderCacheDir_.empty()) return;
         if (const char* e = std::getenv("TTT2_SHADER_WARM"); e && std::strcmp(e, "0") == 0) return;
-        std::thread([this] {
-            SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
-            const auto start = std::chrono::steady_clock::now();
-            BuildCounts n;
-            unsigned vs = 0, ps = 0, failed = 0;
-            std::error_code ec;
-            for (const auto& file : std::filesystem::directory_iterator(shaderCacheDir_ / "ucode", ec))
+        // This runs during the first hardware-backend initialization, before the first game draw
+        // is submitted. Blocking here makes cached shader objects ready before the title paints
+        // its first loading frame, instead of letting warm-up compete with gameplay later.
+        std::vector<std::filesystem::path> files;
+        std::error_code ec;
+        for (const auto& file : std::filesystem::directory_iterator(shaderCacheDir_ / "ucode", ec))
+        {
+            const std::string name = file.path().filename().string();
+            const bool isVs = name.rfind("vs_", 0) == 0, isPs = name.rfind("ps_", 0) == 0;
+            if ((!isVs && !isPs) || file.path().extension() != ".bin" || (isVs && !gpuVsEnabled_)) continue;
+            files.push_back(file.path());
+        }
+        if (files.empty())
+        {
+            std::fprintf(stderr, "[gpu-hw] shader warm-up: no previously captured shader variants; first-use compilation remains enabled\n");
+            return;
+        }
+
+        const auto start = std::chrono::steady_clock::now();
+        BuildCounts n;
+        unsigned vs = 0, ps = 0, failed = 0, done = 0;
+        std::fprintf(stderr, "[gpu-hw] preparing %zu previously captured shader variants before the first game draw\n", files.size());
+        CreateShaderWarmupWindow(files.size(), window_.load());
+        for (const auto& path : files)
+        {
+            ++done;
+            const std::string name = path.filename().string();
+            const bool isVs = name.rfind("vs_", 0) == 0;
+            std::ifstream f(path, std::ios::binary);
+            const std::vector<char> bytes((std::istreambuf_iterator<char>(f)), {});
+            if (bytes.empty() || bytes.size() % 4) { ++failed; continue; }
+            std::vector<uint32_t> code(bytes.size() / 4);
+            std::memcpy(code.data(), bytes.data(), bytes.size());
+            std::string why;
+            try
             {
-                const std::string name = file.path().filename().string();
-                const bool isVs = name.rfind("vs_", 0) == 0, isPs = name.rfind("ps_", 0) == 0;
-                if ((!isVs && !isPs) || file.path().extension() != ".bin" || (isVs && !gpuVsEnabled_)) continue;
-                std::ifstream f(file.path(), std::ios::binary);
-                const std::vector<char> bytes((std::istreambuf_iterator<char>(f)), {});
-                if (bytes.empty() || bytes.size() % 4) continue;
-                std::vector<uint32_t> code(bytes.size() / 4);
-                std::memcpy(code.data(), bytes.data(), bytes.size());
-                std::string why;
-                try
+                if (isVs)
                 {
-                    if (isVs)
-                    {
-                        VsEntry e;
-                        if (BuildVertexShader(code, e, n, why) != BuildResult::Ready) { ++failed; continue; }
-                        std::lock_guard lock(preparedMutex_);
-                        preparedVs_.emplace(VsKey(code), std::move(e));
-                        ++vs;
-                    }
-                    else
-                    {
-                        PsEntry e;
-                        if (BuildPixelShader(code, e, n, why) != BuildResult::Ready) { ++failed; continue; }
-                        std::lock_guard lock(preparedMutex_);
-                        preparedPs_.emplace(PsKey(code), std::move(e));
-                        ++ps;
-                    }
+                    VsEntry entry;
+                    if (BuildVertexShader(code, entry, n, why) != BuildResult::Ready) { ++failed; continue; }
+                    std::lock_guard lock(preparedMutex_);
+                    preparedVs_.emplace(VsKey(code), std::move(entry));
+                    ++vs;
                 }
-                catch (...) { ++failed; }
+                else
+                {
+                    PsEntry entry;
+                    if (BuildPixelShader(code, entry, n, why) != BuildResult::Ready) { ++failed; continue; }
+                    std::lock_guard lock(preparedMutex_);
+                    preparedPs_.emplace(PsKey(code), std::move(entry));
+                    ++ps;
+                }
             }
-            std::fprintf(stderr, "[gpu-hw] shader warm-up: %u vertex + %u pixel shaders ready in %.0f ms (%llu from the bytecode cache, %llu compiled, %u failed)\n",
-                         vs, ps, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count(),
-                         (unsigned long long)n.diskHits, (unsigned long long)n.compiles, failed);
-        }).detach();
+            catch (...) { ++failed; }
+
+            if (done == files.size() || done % 16 == 0)
+            {
+                const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+                const double eta = done ? elapsed * double(files.size() - done) / double(done) : 0.0;
+                std::fprintf(stderr, "[gpu-hw] shader warm-up %u/%zu, ETA %.1f s\n", done, files.size(), eta);
+                UpdateShaderWarmupWindow(done, files.size(), eta);
+            }
+        }
+        DestroyShaderWarmupWindow();
+        std::fprintf(stderr, "[gpu-hw] shader warm-up complete: %u vertex + %u pixel shaders ready in %.0f ms (%llu from the bytecode cache, %llu compiled, %u failed)\n",
+                     vs, ps, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count(),
+                     (unsigned long long)n.diskHits, (unsigned long long)n.compiles, failed);
     }
 
     // EDRAM colour formats (RB_COLOR_INFO.color_format) as D3D11 render targets. TTT2 renders

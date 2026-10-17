@@ -161,32 +161,6 @@ LRESULT CALLBACK KeyCaptureSubclass(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp,UINT_
     return DefSubclassProc(hwnd,msg,wp,lp);
 }
 
-LRESULT CALLBACK DarkComboSubclass(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
-                                   UINT_PTR subclassId, DWORD_PTR reference) {
-    if (msg == WM_PAINT) {
-        const LRESULT result = DefSubclassProc(hwnd, msg, wp, lp);
-        HDC dc = GetDC(hwnd);
-        if (dc) {
-            RECT r{}; GetClientRect(hwnd, &r);
-            const int arrowWidth = 24;
-            RECT arrow{ r.right - arrowWidth, r.top + 1, r.right - 1, r.bottom - 1 };
-            HBRUSH fill = CreateSolidBrush(kPanel); FillRect(dc, &arrow, fill); DeleteObject(fill);
-            HPEN edge = CreatePen(PS_SOLID, 1, kLine); HGDIOBJ oldPen = SelectObject(dc, edge);
-            MoveToEx(dc, r.left, r.top, nullptr); LineTo(dc, r.right - 1, r.top);
-            LineTo(dc, r.right - 1, r.bottom - 1); LineTo(dc, r.left, r.bottom - 1); LineTo(dc, r.left, r.top);
-            MoveToEx(dc, arrow.left, arrow.top + 2, nullptr); LineTo(dc, arrow.left, arrow.bottom - 2);
-            SelectObject(dc, oldPen); DeleteObject(edge);
-            HPEN glyph = CreatePen(PS_SOLID, 2, kMuted); oldPen = SelectObject(dc, glyph);
-            const int cx = (arrow.left + arrow.right) / 2, cy = (arrow.top + arrow.bottom) / 2;
-            MoveToEx(dc, cx - 4, cy - 2, nullptr); LineTo(dc, cx, cy + 2); LineTo(dc, cx + 4, cy - 2);
-            SelectObject(dc, oldPen); DeleteObject(glyph); ReleaseDC(hwnd, dc);
-        }
-        return result;
-    }
-    if (msg == WM_NCDESTROY) RemoveWindowSubclass(hwnd, DarkComboSubclass, subclassId);
-    return DefSubclassProc(hwnd, msg, wp, lp);
-}
-
 std::wstring LocalRoot() {
     wchar_t path[MAX_PATH]{};
     DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", path, MAX_PATH);
@@ -404,10 +378,9 @@ void StartRankedRequest(int action) {
 }
 HWND Add(int id, const wchar_t* cls, const wchar_t* text, DWORD style, int x,int y,int w,int h) {
     if (wcscmp(cls,L"BUTTON")==0 && id!=0) style=(style&~BS_TYPEMASK)|BS_OWNERDRAW|WS_TABSTOP;
-    if (wcscmp(cls,L"COMBOBOX")==0) style|=CBS_OWNERDRAWFIXED|CBS_HASSTRINGS;
     HWND control=CreateWindowExW(0,cls,text,WS_CHILD|WS_VISIBLE|style,x,y,w,h,g_window,(HMENU)(INT_PTR)id,
         GetModuleHandleW(nullptr),nullptr);
-    if(control){SendMessageW(control,WM_SETFONT,(WPARAM)g_bodyFont,TRUE);if(wcscmp(cls,L"COMBOBOX")==0){SetWindowTheme(control,L"DarkMode_Explorer",nullptr);SetWindowSubclass(control,DarkComboSubclass,(UINT_PTR)id,0);}else if(wcscmp(cls,L"EDIT")==0)SetWindowTheme(control,L"DarkMode_Explorer",nullptr);SetWindowSubclass(control,WheelForwardSubclass,0,0);g_page.push_back(control);g_pageItems.push_back({control,RECT{x,y,x+w,y+h}});g_pageBottom=(std::max)(g_pageBottom,y+h);}
+    if(control){SendMessageW(control,WM_SETFONT,(WPARAM)g_bodyFont,TRUE);if(wcscmp(cls,L"COMBOBOX")==0||wcscmp(cls,L"EDIT")==0)SetWindowTheme(control,L"DarkMode_Explorer",nullptr);SetWindowSubclass(control,WheelForwardSubclass,0,0);g_page.push_back(control);g_pageItems.push_back({control,RECT{x,y,x+w,y+h}});g_pageBottom=(std::max)(g_pageBottom,y+h);}
     return control;
 }
 void Label(const wchar_t* text,int x,int y,int w,int h,bool muted=false) {
@@ -741,7 +714,6 @@ LRESULT CALLBACK Proc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
     }
     case WM_CTLCOLORBTN: {HDC dc=(HDC)wp;SetTextColor(dc,kCream);SetBkColor(dc,kPanel);return (LRESULT)g_panelBrush;}
     case WM_CTLCOLOREDIT: case WM_CTLCOLORLISTBOX: {HDC dc=(HDC)wp;SetTextColor(dc,kCream);SetBkColor(dc,kPanel);return (LRESULT)g_panelBrush;}
-    case WM_MEASUREITEM: {auto* m=(MEASUREITEMSTRUCT*)lp;if(m->CtlType==ODT_COMBOBOX){m->itemHeight=28;return TRUE;}break;}
     case WM_DRAWITEM: {
         auto* d=(DRAWITEMSTRUCT*)lp;const int id=(int)d->CtlID;
         if(d->CtlType==ODT_STATIC){HPEN p=CreatePen(PS_SOLID,1,kLine);auto old=(HPEN)SelectObject(d->hDC,p);MoveToEx(d->hDC,d->rcItem.left,d->rcItem.top,nullptr);LineTo(d->hDC,d->rcItem.right,d->rcItem.top);SelectObject(d->hDC,old);DeleteObject(p);return TRUE;}
@@ -750,17 +722,6 @@ LRESULT CALLBACK Proc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
         const bool overlayCheck=id>=ID_OVERLAY_FIRST&&id<ID_OVERLAY_FIRST+8;
         const bool checkbox=id==ID_ASYNC||id==ID_WARM||id==ID_FAST||id==ID_HARDWARE||id==ID_CLOSE_ON_LAUNCH||id==ID_PLAYER2_ENABLED||overlayCheck;
         if(checkbox){const bool checked=id==ID_PLAYER2_ENABLED?g_settings.player2KeyboardEnabled:overlayCheck?g_settings.overlay[id-ID_OVERLAY_FIRST]:id==ID_ASYNC?g_settings.asyncShaders:id==ID_WARM?g_settings.warmShaders:id==ID_FAST?g_settings.fastShaders:id==ID_HARDWARE?g_settings.hardware:g_settings.closeOnLaunch;FillRect(d->hDC,&d->rcItem,g_darkBrush);RECT box{d->rcItem.left,d->rcItem.top+6,d->rcItem.left+16,d->rcItem.top+22};HBRUSH b=CreateSolidBrush(checked?kRed:kPanel);FillRect(d->hDC,&box,b);DeleteObject(b);HBRUSH edge=CreateSolidBrush(kLine);FrameRect(d->hDC,&box,edge);DeleteObject(edge);if(checked){HPEN p=CreatePen(PS_SOLID,2,kCream);auto old=(HPEN)SelectObject(d->hDC,p);MoveToEx(d->hDC,box.left+3,box.top+8,nullptr);LineTo(d->hDC,box.left+7,box.top+12);LineTo(d->hDC,box.left+13,box.top+4);SelectObject(d->hDC,old);DeleteObject(p);}RECT tx=d->rcItem;tx.left+=25;SetBkMode(d->hDC,TRANSPARENT);SetTextColor(d->hDC,kCream);wchar_t label[128]{};GetWindowTextW(d->hwndItem,label,128);DrawTextW(d->hDC,label,-1,&tx,DT_LEFT|DT_VCENTER|DT_SINGLELINE);return TRUE;}
-        if(d->CtlType==ODT_COMBOBOX){
-            const bool selected=(d->itemState&ODS_SELECTED)!=0;
-            HBRUSH fill=CreateSolidBrush(selected?RGB(35,53,66):kPanel);
-            FillRect(d->hDC,&d->rcItem,fill);DeleteObject(fill);
-            HPEN edge=CreatePen(PS_SOLID,1,kLine);HGDIOBJ oldPen=SelectObject(d->hDC,edge);HGDIOBJ oldBrush=SelectObject(d->hDC,GetStockObject(NULL_BRUSH));
-            Rectangle(d->hDC,d->rcItem.left,d->rcItem.top,d->rcItem.right,d->rcItem.bottom);SelectObject(d->hDC,oldBrush);SelectObject(d->hDC,oldPen);DeleteObject(edge);
-            int item=(int)d->itemID;if(item<0)item=(int)SendMessageW(d->hwndItem,CB_GETCURSEL,0,0);
-            wchar_t value[128]{};if(item>=0)SendMessageW(d->hwndItem,CB_GETLBTEXT,item,(LPARAM)value);
-            RECT text=d->rcItem;InflateRect(&text,-8,0);SetBkMode(d->hDC,TRANSPARENT);SetTextColor(d->hDC,kCream);
-            DrawTextW(d->hDC,value,-1,&text,DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS);return TRUE;
-        }
         int pageIndex=-1;switch(id){case ID_HOME:pageIndex=0;break;case ID_GRAPHICS:pageIndex=1;break;case ID_PERFORMANCE:pageIndex=2;break;case ID_GAME:pageIndex=3;break;case ID_ADVANCED:pageIndex=4;break;case ID_CONTROLS:pageIndex=5;break;case ID_ONLINE:pageIndex=6;break;}const bool active=pageIndex>=0&&int(g_tab)==pageIndex;
         const bool play=id==ID_PLAY;const bool controlTab=id==ID_CONTROL_PLAYER1||id==ID_CONTROL_PLAYER2;const bool selectedControl=id==ID_CONTROL_PLAYER1?g_controlPlayer==0:id==ID_CONTROL_PLAYER2&&g_controlPlayer==1;const bool primary=play;const COLORREF fill=primary?kRed:((active||(controlTab&&selectedControl))?RGB(47,34,39):kPanel);HBRUSH brush=CreateSolidBrush(fill);
         HPEN p=CreatePen(PS_SOLID,1,primary?kRed:kLine);auto oldPen=(HPEN)SelectObject(d->hDC,p);auto oldBrush=(HBRUSH)SelectObject(d->hDC,brush);RoundRect(d->hDC,d->rcItem.left,d->rcItem.top,d->rcItem.right,d->rcItem.bottom,8,8);SelectObject(d->hDC,oldBrush);SelectObject(d->hDC,oldPen);DeleteObject(p);DeleteObject(brush);

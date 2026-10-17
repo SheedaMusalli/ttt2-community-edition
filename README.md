@@ -11,6 +11,7 @@ An unofficial Windows community project for running *Tekken Tag Tournament 2* th
 - **Shader cache warm-up:** Previously cached D3D11 shader variants are prepared before the first game draw. The warm-up window reports progress, known variant count, and an ETA. A shader variant the game has never encountered cannot be compiled in advance; it is compiled when first discovered and can still cause a hitch.
 - **Graphics path:** The runtime provides Direct3D 11 hardware rendering and a software fallback. D3D12, Vulkan, FSR, and DLSS are not implemented. GPU rendering accelerates supported rasterization and pixel-shader work, while guest command processing and some vertex work still use the CPU.
 - **Save tools:** Choose a save folder and create or restore local save backups from the launcher.
+- **Game save data:** The Release build enables the local save-container backend by default. New profiles can create and use save data under `%LOCALAPPDATA%\TTT2Recomp\saves`; the launcher can open that location and manage backups.
 - **Ranked-service prototype:** The launcher can contact a self-hosted service, create a player identity, save the returned bearer token encrypted with Windows DPAPI, validate the token, request a profile, enter or cancel a queue, and refresh status. Local loopback servers allow registration by default. Remote deployments keep it disabled unless the operator explicitly enables it; the service applies a basic per-IP registration limit. The Python standard-library service stores reservations and provisional ratings.
 
 ## Important limitations

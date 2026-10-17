@@ -372,3 +372,14 @@ The full CTest suite was also rerun after the v2.1 build: `rollback_loop`,
 child-process completion stage (`server exit 4` after 10 seconds); the harness does
 not complete the expected socket datagram round-trip, so XNet route integration is
 not validated and remains an open blocker.
+
+### Save creation failure fix (2026-10-17)
+
+The screenshots' “Failed to create save data” prompt was caused by the runtime being
+compiled with `TTT2_LOCAL_SAVES=0`: `SaveCreateContent` then returned access denied
+for all save-container creation requests. The CMake default is now enabled, and a
+Windows regression target verifies create, mount, enumerate, reopen, and delete
+against a temporary profile save root. The test passes under the installed
+Clang-CL/v143 toolchain. A Release runtime and installer were rebuilt with this
+setting enabled; fresh profiles store data under
+`%LOCALAPPDATA%\TTT2Recomp\saves\<profile XUID>`.

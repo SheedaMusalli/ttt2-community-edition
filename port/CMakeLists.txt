@@ -13,13 +13,25 @@ if(CMAKE_HOST_WIN32 AND NOT DEFINED CMAKE_RC_COMPILER)
         set(CMAKE_RC_COMPILER "${TTT2_RC_COMPILER}" CACHE FILEPATH "Windows SDK resource compiler")
     endif()
 endif()
+if(CMAKE_HOST_WIN32 AND CMAKE_RC_COMPILER MATCHES "Windows Kits/10/bin/([0-9.]+)/x64/rc.exe$")
+    set(TTT2_WINDOWS_KIT_VERSION "${CMAKE_MATCH_1}")
+    get_filename_component(TTT2_RC_X64_DIR "${CMAKE_RC_COMPILER}" DIRECTORY)
+    get_filename_component(TTT2_RC_VERSION_DIR "${TTT2_RC_X64_DIR}" DIRECTORY)
+    get_filename_component(TTT2_WINDOWS_KITS_ROOT "${TTT2_RC_VERSION_DIR}/../.." ABSOLUTE)
+    set(TTT2_RC_INCLUDE_FLAGS
+        "/I\"${TTT2_WINDOWS_KITS_ROOT}/Include/${TTT2_WINDOWS_KIT_VERSION}/um\" /I\"${TTT2_WINDOWS_KITS_ROOT}/Include/${TTT2_WINDOWS_KIT_VERSION}/shared\"")
+    set(CMAKE_RC_FLAGS_INIT "${CMAKE_RC_FLAGS_INIT} ${TTT2_RC_INCLUDE_FLAGS}")
+    if(NOT CMAKE_RC_FLAGS MATCHES "Windows Kits/10/Include/[0-9.]+/um")
+        string(APPEND CMAKE_RC_FLAGS " ${TTT2_RC_INCLUDE_FLAGS}")
+    endif()
+endif()
 
 project(tekken_recomp CXX)
 enable_language(C)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-option(TTT2_LOCAL_SAVES "Enable the experimental persistent local save container" OFF)
+option(TTT2_LOCAL_SAVES "Enable persistent local save containers" ON)
 
 # Standalone verification of the rollback coordinator. This uses a synthetic deterministic
 # state fixture and does not link or alter guest session/runtime hooks.
@@ -31,6 +43,13 @@ add_executable(ttt2_test_netplay_input
     tools/test_netplay_input.cpp
     src/runtime/kernel/netplay_input.cpp)
 target_include_directories(ttt2_test_netplay_input PRIVATE src/runtime/kernel)
+if(WIN32)
+    add_executable(ttt2_test_save_store
+        tools/test_save_store.cpp
+        src/runtime/kernel/save_store.cpp)
+    target_include_directories(ttt2_test_save_store PRIVATE src/runtime/kernel)
+    target_compile_definitions(ttt2_test_save_store PRIVATE TTT2_LOCAL_SAVES=1 _CRT_SECURE_NO_WARNINGS)
+endif()
 add_library(ttt2_enet STATIC
     third_party/enet/callbacks.c
     third_party/enet/compress.c
@@ -64,6 +83,7 @@ if(BUILD_TESTING)
     add_test(NAME rollback_loop COMMAND ttt2_test_rollback)
     add_test(NAME netplay_input COMMAND ttt2_test_netplay_input)
     if(WIN32)
+        add_test(NAME save_store COMMAND ttt2_test_save_store)
         add_test(NAME xnet_route COMMAND ttt2_test_xnet_route)
         set_tests_properties(xnet_route PROPERTIES TIMEOUT 30 ENVIRONMENT "TTT2_NET=loopback")
         find_package(Python3 COMPONENTS Interpreter REQUIRED)
@@ -75,6 +95,7 @@ if(MSVC)
     target_compile_options(ttt2_test_rollback PRIVATE /W4 /WX)
     target_compile_options(ttt2_test_netplay_input PRIVATE /W4 /WX)
     if(WIN32)
+        target_compile_options(ttt2_test_save_store PRIVATE /W4 /WX)
         target_compile_options(ttt2_test_xnet_route PRIVATE /W4 /WX)
         target_compile_options(ttt2_test_ranked_e2e PRIVATE /W4 /WX)
     endif()
@@ -82,6 +103,7 @@ else()
     target_compile_options(ttt2_test_rollback PRIVATE -Wall -Wextra -Werror)
     target_compile_options(ttt2_test_netplay_input PRIVATE -Wall -Wextra -Werror)
     if(WIN32)
+        target_compile_options(ttt2_test_save_store PRIVATE -Wall -Wextra -Werror)
         target_compile_options(ttt2_test_xnet_route PRIVATE -Wall -Wextra -Werror)
         target_compile_options(ttt2_test_ranked_e2e PRIVATE -Wall -Wextra -Werror)
     endif()

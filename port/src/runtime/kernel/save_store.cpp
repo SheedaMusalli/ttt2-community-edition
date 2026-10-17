@@ -189,7 +189,7 @@ uint32_t SaveContentCreator(const SaveContentRecord& record,uint64_t& creator)
 }
 bool ResolveSaveFile(const std::string& guest,std::filesystem::path& host,std::filesystem::path& container,uint32_t& error)
 {
-    std::string p=guest;std::replace(p.begin(),p.end(),'\\','/');if(p.rfind("/??/",0)==0)p.erase(0,4);
+    std::string p=guest;std::replace(p.begin(),p.end(),'\\','/');if(p.rfind("/?" "?/",0)==0)p.erase(0,4);
     const auto colon=p.find(':');if(colon==std::string::npos)return false;
     const auto name=Lower(p.substr(0,colon));if(name!="tag25save"&&name!="dummysave")return false;
     std::lock_guard lock(g_saveMutex);error=ERROR_PATH_NOT_FOUND;

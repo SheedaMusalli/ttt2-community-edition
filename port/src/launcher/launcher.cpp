@@ -380,7 +380,15 @@ HWND Add(int id, const wchar_t* cls, const wchar_t* text, DWORD style, int x,int
     if (wcscmp(cls,L"BUTTON")==0 && id!=0) style=(style&~BS_TYPEMASK)|BS_OWNERDRAW|WS_TABSTOP;
     HWND control=CreateWindowExW(0,cls,text,WS_CHILD|WS_VISIBLE|style,x,y,w,h,g_window,(HMENU)(INT_PTR)id,
         GetModuleHandleW(nullptr),nullptr);
-    if(control){SendMessageW(control,WM_SETFONT,(WPARAM)g_bodyFont,TRUE);if(wcscmp(cls,L"COMBOBOX")==0||wcscmp(cls,L"EDIT")==0)SetWindowTheme(control,L"DarkMode_Explorer",nullptr);SetWindowSubclass(control,WheelForwardSubclass,0,0);g_page.push_back(control);g_pageItems.push_back({control,RECT{x,y,x+w,y+h}});g_pageBottom=(std::max)(g_pageBottom,y+h);}
+    if(control){
+        SendMessageW(control,WM_SETFONT,(WPARAM)g_bodyFont,TRUE);
+        const bool combo=wcscmp(cls,L"COMBOBOX")==0;
+        if(wcscmp(cls,L"EDIT")==0||combo)SetWindowTheme(control,L"DarkMode_Explorer",nullptr);
+        // Keep native combo mouse handling intact. The scroll-forward subclass is
+        // for ordinary page controls only; combo dropdowns own their pointer input.
+        if(!combo)SetWindowSubclass(control,WheelForwardSubclass,0,0);
+        g_page.push_back(control);g_pageItems.push_back({control,RECT{x,y,x+w,y+h}});g_pageBottom=(std::max)(g_pageBottom,y+h);
+    }
     return control;
 }
 void Label(const wchar_t* text,int x,int y,int w,int h,bool muted=false) {
@@ -389,9 +397,8 @@ void Label(const wchar_t* text,int x,int y,int w,int h,bool muted=false) {
 }
 void Select(HWND combo,int index) { if(combo) SendMessageW(combo,CB_SETCURSEL,index,0); }
 HWND Combo(int id,int x,int y,int width,const std::vector<std::wstring>& items,int selected) {
-    HWND c=Add(id,L"COMBOBOX",L"",CBS_DROPDOWNLIST|WS_TABSTOP,x,y,width,32);
+    HWND c=Add(id,L"COMBOBOX",L"",CBS_DROPDOWNLIST|WS_TABSTOP|WS_VSCROLL,x,y,width,32);
     for(const auto& item:items) SendMessageW(c,CB_ADDSTRING,0,(LPARAM)item.c_str());
-    SendMessageW(c,CB_SETMINVISIBLE,(WPARAM)(std::min)(items.size(),size_t(8)),0);
     Select(c,selected);
     return c;
 }
@@ -748,7 +755,10 @@ LRESULT CALLBACK Proc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
         if(id==ID_SAVE_BACKUP){ReadControls();const auto dst=std::filesystem::path(LocalRoot()+L"\\save-backups\\"+Timestamp());const bool ok=CopySaveTree(SaveDirectory(),dst);MessageBoxW(hwnd,ok?L"Save backup created.":L"No save files were found, or the backup could not be written.",L"Save backup",ok?MB_ICONINFORMATION:MB_ICONWARNING);return 0;}
         if(id==ID_SAVE_RESTORE){ReadControls();const auto src=LatestBackup();if(src.empty()){MessageBoxW(hwnd,L"There are no save backups to restore.",L"Restore saves",MB_ICONINFORMATION);return 0;}if(MessageBoxW(hwnd,L"Restore the latest backup over the current save files? A safety copy of current files will be made first when they exist.",L"Restore saves",MB_ICONWARNING|MB_YESNO)!=IDYES)return 0;const auto current=SaveDirectory();std::error_code ec;const bool hasCurrent=std::filesystem::exists(current,ec);const auto safety=std::filesystem::path(LocalRoot()+L"\\save-backups\\before-restore-"+Timestamp());const bool safe=!hasCurrent||CopySaveTree(current,safety);const bool ok=safe&&CopySaveTree(src,current);MessageBoxW(hwnd,ok?L"The latest save backup was restored.":L"Restore failed. Your safety backup may be available in the save-backups folder.",L"Restore saves",ok?MB_ICONINFORMATION:MB_ICONERROR);return 0;}
         if(id==ID_VERIFY){const auto exe=InstallDir()+L"\\"+kGameExe;const auto image=InstallDir()+L"\\game\\tekken.img";const bool ok=GetFileAttributesW(exe.c_str())!=INVALID_FILE_ATTRIBUTES&&GetFileAttributesW(image.c_str())!=INVALID_FILE_ATTRIBUTES;MessageBoxW(hwnd,ok?L"The game executable and installed image were found.":L"One or more required game files are missing. Run the installer again.",L"Check install",ok?MB_ICONINFORMATION:MB_ICONWARNING);return 0;}
-        if(id==ID_MODE||id==ID_RESOLUTION||id==ID_SCALE||id==ID_INPUT_POLL_RATE){ReadControls();return 0;}
+        if(id==ID_MODE||id==ID_RESOLUTION||id==ID_SCALE||id==ID_INPUT_POLL_RATE){
+            if(HIWORD(wp)==CBN_SELCHANGE)ReadControls();
+            return 0;
+        }
         if(id>=ID_OVERLAY_FIRST&&id<ID_OVERLAY_FIRST+8){g_settings.overlay[id-ID_OVERLAY_FIRST]=!g_settings.overlay[id-ID_OVERLAY_FIRST];InvalidateRect(GetDlgItem(hwnd,id),nullptr,TRUE);return 0;}
         if(id==ID_ASYNC||id==ID_WARM||id==ID_FAST||id==ID_HARDWARE||id==ID_CLOSE_ON_LAUNCH){if(id==ID_ASYNC)g_settings.asyncShaders=!g_settings.asyncShaders;else if(id==ID_WARM)g_settings.warmShaders=!g_settings.warmShaders;else if(id==ID_FAST)g_settings.fastShaders=!g_settings.fastShaders;else if(id==ID_HARDWARE)g_settings.hardware=!g_settings.hardware;else g_settings.closeOnLaunch=!g_settings.closeOnLaunch;InvalidateRect(GetDlgItem(hwnd,id),nullptr,TRUE);return 0;}
         break;

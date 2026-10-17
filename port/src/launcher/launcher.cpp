@@ -78,7 +78,7 @@ Settings g_settings;
 HFONT g_bodyFont = nullptr, g_headingFont = nullptr, g_sectionFont = nullptr, g_smallFont = nullptr;
 HBRUSH g_darkBrush = nullptr, g_panelBrush = nullptr;
 std::vector<HWND> g_page;
-struct PageItem { HWND hwnd; RECT bounds; };
+struct PageItem { HWND hwnd; RECT bounds; int windowHeight; };
 std::vector<PageItem> g_pageItems;
 std::array<HWND,7> g_nav{};
 HWND g_status = nullptr, g_play = nullptr;
@@ -108,7 +108,9 @@ void ReflowPage(HWND hwnd) {
         RECT r=item.bounds;
         const int height=r.bottom-r.top;
         r.top-=g_scrollOffset; r.bottom=r.top+height;
-        MoveWindow(item.hwnd,r.left,r.top,r.right-r.left,height,TRUE);
+        // A native dropdown combo's HWND height is its expanded height. The
+        // collapsed field still occupies only the logical layout height.
+        MoveWindow(item.hwnd,r.left,r.top,r.right-r.left,item.windowHeight,TRUE);
         const bool visible=r.top>=g_viewportTop && r.bottom<=g_viewportBottom;
         ShowWindow(item.hwnd,visible?SW_SHOW:SW_HIDE);
     }
@@ -376,7 +378,8 @@ void StartRankedRequest(int action) {
     const HWND target=g_window;
     std::thread([target,base,token,route,payload]{auto* result=new std::wstring(RankedRequest(base,token,route,payload));if(!PostMessageW(target,WM_APP+6,0,(LPARAM)result))delete result;}).detach();
 }
-HWND Add(int id, const wchar_t* cls, const wchar_t* text, DWORD style, int x,int y,int w,int h) {
+HWND Add(int id, const wchar_t* cls, const wchar_t* text, DWORD style, int x,int y,int w,int h,
+         int layoutHeight=0) {
     if (wcscmp(cls,L"BUTTON")==0 && id!=0) style=(style&~BS_TYPEMASK)|BS_OWNERDRAW|WS_TABSTOP;
     HWND control=CreateWindowExW(0,cls,text,WS_CHILD|WS_VISIBLE|style,x,y,w,h,g_window,(HMENU)(INT_PTR)id,
         GetModuleHandleW(nullptr),nullptr);
@@ -387,7 +390,8 @@ HWND Add(int id, const wchar_t* cls, const wchar_t* text, DWORD style, int x,int
         // Keep native combo mouse handling intact. The scroll-forward subclass is
         // for ordinary page controls only; combo dropdowns own their pointer input.
         if(!combo)SetWindowSubclass(control,WheelForwardSubclass,0,0);
-        g_page.push_back(control);g_pageItems.push_back({control,RECT{x,y,x+w,y+h}});g_pageBottom=(std::max)(g_pageBottom,y+h);
+        const int logicalHeight=layoutHeight>0?layoutHeight:h;
+        g_page.push_back(control);g_pageItems.push_back({control,RECT{x,y,x+w,y+logicalHeight},h});g_pageBottom=(std::max)(g_pageBottom,y+logicalHeight);
     }
     return control;
 }
@@ -397,7 +401,11 @@ void Label(const wchar_t* text,int x,int y,int w,int h,bool muted=false) {
 }
 void Select(HWND combo,int index) { if(combo) SendMessageW(combo,CB_SETCURSEL,index,0); }
 HWND Combo(int id,int x,int y,int width,const std::vector<std::wstring>& items,int selected) {
-    HWND c=Add(id,L"COMBOBOX",L"",CBS_DROPDOWNLIST|WS_TABSTOP|WS_VSCROLL,x,y,width,32);
+    constexpr int fieldHeight=32;
+    constexpr int listRowHeight=26;
+    const int visibleRows=(std::max)(1,(int)(std::min)(items.size(),size_t(8)));
+    const int expandedHeight=fieldHeight+visibleRows*listRowHeight+4;
+    HWND c=Add(id,L"COMBOBOX",L"",CBS_DROPDOWNLIST|WS_TABSTOP|WS_VSCROLL,x,y,width,expandedHeight,fieldHeight);
     for(const auto& item:items) SendMessageW(c,CB_ADDSTRING,0,(LPARAM)item.c_str());
     Select(c,selected);
     return c;

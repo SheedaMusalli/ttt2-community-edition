@@ -10,10 +10,17 @@ struct Reservation
     uint8_t sessionKey[16] = {};
     char opponentIp[16] = {};
     uint16_t opponentPort = 0;
+    uint8_t role = 0;
+    char relayIp[16] = {};
+    uint16_t relayPort = 0;
+    uint8_t relayToken[16] = {};
+    bool hasRelay = false;
 };
 
 // Uses TTT2_RANKED_SERVICE, TTT2_RANKED_TOKEN, TTT2_RANKED_PLAYER, optional
 // TTT2_RANKED_BUILD / TTT2_RANKED_REGION / TTT2_RANKED_ADVERTISE_IP.
 bool Enabled();
+// Imports a launcher-confirmed reservation without contacting or re-entering the queue.
+bool AcquireConfirmedReservation(Reservation& result, char* error, uint32_t errorCapacity);
 bool AcquireReservation(Reservation& result, char* error, uint32_t errorCapacity);
 } // namespace ranked

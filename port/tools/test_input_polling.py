@@ -74,6 +74,10 @@ int main() {
     CHECK(NormalizePadPollRateHz(4000)==4000);
     CHECK(NormalizePadPollRateHz(8000)==8000);
     CHECK(NormalizePadPollRateHz(0)==1000 && NormalizePadPollRateHz(480)==1000);
+    CHECK(EffectivePadPollRateHz(250)==250 && EffectivePadPollRateHz(500)==500);
+    CHECK(EffectivePadPollRateHz(750)==750 && EffectivePadPollRateHz(1000)==1000);
+    CHECK(EffectivePadPollRateHz(2000)==1000 && EffectivePadPollRateHz(4000)==1000);
+    CHECK(EffectivePadPollRateHz(8000)==1000);
     CHECK(PadPollIntervalForHz(250).count()==4000000);
     CHECK(PadPollIntervalForHz(500).count()==2000000);
     CHECK(PadPollIntervalForHz(750).count()==1333333);

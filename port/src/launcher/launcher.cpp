@@ -22,9 +22,11 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cwchar>
 #include <filesystem>
 #include <memory>
+#include <map>
 #include <string>
 #include <thread>
 #include <vector>
@@ -49,13 +51,15 @@ constexpr int kMaxContentWidth = 1440;
 constexpr std::array<int,7> kInputPollRates{250,500,750,1000,2000,4000,8000};
 enum : int { ID_HOME=100, ID_GRAPHICS, ID_PERFORMANCE, ID_GAME, ID_ADVANCED, ID_CONTROLS, ID_ONLINE,
              ID_SAVE=180, ID_PLAY, ID_MODE=200, ID_RESOLUTION, ID_SCALE,
-             ID_ASYNC=210, ID_WARM, ID_FAST, ID_HARDWARE, ID_INPUT_POLL_RATE,
+             ID_ASYNC=210, ID_WARM, ID_FAST, ID_HARDWARE, ID_INPUT_POLL_RATE, ID_DRAW_DIAGNOSTICS,
              ID_SAVE_PATH=220, ID_BROWSE, ID_OPEN_SAVES,
              ID_OPEN_INSTALL=230, ID_OPEN_LOG, ID_VERIFY, ID_SAVE_BACKUP=240, ID_OPEN_CONFIG, ID_SAVE_RESTORE,
              ID_CLOSE_ON_LAUNCH=250, ID_OVERLAY_FIRST=260, ID_KEY_FIRST=300, ID_RANKED_URL=340, ID_RANKED_TOKEN,
              ID_RANKED_BUILD, ID_RANKED_REGION, ID_RANKED_HEALTH, ID_RANKED_PROFILE,
              ID_RANKED_QUEUE, ID_RANKED_STATUS, ID_RANKED_CANCEL, ID_RANKED_RESULT, ID_RANKED_REGISTER,
-             ID_KEY2_FIRST=420, ID_PLAYER2_ENABLED=450, ID_CONTROL_PLAYER1=451, ID_CONTROL_PLAYER2=452 };
+             ID_KEY2_FIRST=420, ID_PLAYER2_ENABLED=450, ID_CONTROL_PLAYER1=451, ID_CONTROL_PLAYER2=452,
+             ID_RANKED_ACCEPT=453, ID_RANKED_DECLINE=454, ID_CHALLENGE_TIMER=455, ID_STATUS_TIMER=456,
+             ID_COOLDOWN_TIMER=457, ID_CONSOLE_LOGS=458 };
 enum Tab { Home, Graphics, Performance, Game, Advanced, Controls, Online };
 struct Settings {
     int mode = 0;
@@ -65,9 +69,13 @@ struct Settings {
     bool warmShaders = true;
     bool fastShaders = true;
     int inputPollRateHz = 1000;
+    bool drawDiagnostics = false;
+    bool consoleLogs = false;
     bool hardware = true;
     bool closeOnLaunch = true;
     std::array<bool,8> overlay{true,true,false,false,false,false,false,false};
+    bool overlayEnabled = true;
+    int overlayToggleKey = VK_F10;
     std::wstring saveRoot;
     std::array<int,24> keys{VK_UP,VK_DOWN,VK_LEFT,VK_RIGHT,'A','S','Z','X','Q','W','E','R','D','F',VK_RETURN,VK_BACK};
     std::array<int,24> keys2{'I','K','J','L','U','O','N','M','Y','H','7','8','5','6',VK_NUMPAD0,VK_DECIMAL};
@@ -83,9 +91,20 @@ struct PageItem { HWND hwnd; RECT bounds; int windowHeight; };
 std::vector<PageItem> g_pageItems;
 std::array<HWND,7> g_nav{};
 HWND g_status = nullptr, g_play = nullptr;
+HWND g_challengePanel = nullptr, g_challengeTitle = nullptr, g_challengeOpponent = nullptr;
+HWND g_challengeRating = nullptr, g_challengeDisconnect = nullptr, g_challengeTime = nullptr;
+HWND g_challengeProgress = nullptr, g_challengeAccept = nullptr, g_challengeDecline = nullptr;
 HANDLE g_gameProcess = nullptr;
 std::atomic<bool> g_rankedBusy{false};
 bool g_registrationValidation = false;
+bool g_rankedSearching = false, g_acceptSubmitted = false;
+bool g_closeAfterDecline = false;
+bool g_capturingOverlayKey = false;
+std::wstring g_pendingMatchId;
+std::chrono::steady_clock::time_point g_acceptDeadline{};
+std::chrono::steady_clock::time_point g_lastQueueRenew{};
+std::chrono::steady_clock::time_point g_queueCooldownUntil{};
+bool g_queueLeaseRenew = true;
 int g_controlPlayer = 0;
 int g_capturingKey = -1;
 int g_contentX = kContentMargin, g_contentWidth = 1032, g_scrollOffset = 0, g_pageBottom = 0;
@@ -139,6 +158,23 @@ std::wstring KeyName(int vk) {
     switch(vk){case 0:return L"UNBOUND";case VK_UP:return L"UP";case VK_DOWN:return L"DOWN";case VK_LEFT:return L"LEFT";case VK_RIGHT:return L"RIGHT";case VK_SPACE:return L"SPACE";case VK_RETURN:return L"ENTER";case VK_BACK:return L"BACKSPACE";case VK_TAB:return L"TAB";case VK_LSHIFT:return L"L SHIFT";case VK_RSHIFT:return L"R SHIFT";case VK_LCONTROL:return L"L CTRL";case VK_RCONTROL:return L"R CTRL";case VK_LMENU:return L"L ALT";case VK_RMENU:return L"R ALT";case VK_DECIMAL:return L"NUM .";case VK_MULTIPLY:return L"NUM *";case VK_ADD:return L"NUM +";case VK_SUBTRACT:return L"NUM -";case VK_DIVIDE:return L"NUM /";case VK_OEM_MINUS:return L"-";case VK_OEM_PLUS:return L"=";case VK_OEM_COMMA:return L",";case VK_OEM_PERIOD:return L".";case VK_OEM_1:return L";";case VK_OEM_2:return L"/";case VK_OEM_3:return L"`";case VK_OEM_4:return L"[";case VK_OEM_5:return L"\\";case VK_OEM_6:return L"]";case VK_OEM_7:return L"'";default:return L"KEY "+std::to_wstring(vk);}
 }
 
+constexpr int ID_OVERLAY_ENABLE = 268;
+constexpr int ID_OVERLAY_HOTKEY = 269;
+
+struct EnvCaseLess {
+    bool operator()(const std::wstring& a,const std::wstring& b) const { return _wcsicmp(a.c_str(),b.c_str())<0; }
+};
+
+std::vector<wchar_t> ChildEnvironment(const std::map<std::wstring,std::wstring,EnvCaseLess>& overrides) {
+    std::map<std::wstring,std::wstring,EnvCaseLess> values;
+    LPWCH block=GetEnvironmentStringsW();
+    if(block){for(const wchar_t* p=block;*p;p+=wcslen(p)+1){const wchar_t* separator=wcschr(p+(*p==L'='?1:0),L'=');if(!separator)continue;values[std::wstring(p,size_t(separator-p))]=separator+1;}FreeEnvironmentStringsW(block);}
+    for(const auto& entry:overrides){if(entry.second.empty())values.erase(entry.first);else values[entry.first]=entry.second;}
+    std::vector<wchar_t> result;
+    for(const auto& entry:values){result.insert(result.end(),entry.first.begin(),entry.first.end());result.push_back(L'=');result.insert(result.end(),entry.second.begin(),entry.second.end());result.push_back(L'\0');}
+    result.push_back(L'\0');return result;
+}
+
 int CapturedVirtualKey(UINT message, WPARAM key, LPARAM data) {
     int vk=static_cast<int>(key);
     const bool extended=(data&(1LL<<24))!=0;
@@ -151,6 +187,14 @@ int CapturedVirtualKey(UINT message, WPARAM key, LPARAM data) {
 
 LRESULT CALLBACK KeyCaptureSubclass(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp,UINT_PTR id,DWORD_PTR) {
     if(msg==WM_GETDLGCODE)return DefSubclassProc(hwnd,msg,wp,lp)|DLGC_WANTALLKEYS;
+    if((msg==WM_KEYDOWN||msg==WM_SYSKEYDOWN)&&g_capturingOverlayKey&&int(id)==ID_OVERLAY_HOTKEY){
+        if(lp&(1LL<<30))return 0;
+        const int vk=CapturedVirtualKey(msg,wp,lp);
+        if(vk==VK_ESCAPE){g_capturingOverlayKey=false;SetWindowTextW(hwnd,KeyName(g_settings.overlayToggleKey).c_str());SetWindowTextW(g_status,L"Overlay hotkey assignment cancelled.");InvalidateRect(hwnd,nullptr,TRUE);return 0;}
+        const bool invalid=!vk||vk==VK_LWIN||vk==VK_RWIN||vk==VK_APPS||vk==VK_SNAPSHOT||vk==VK_SCROLL||vk==VK_PAUSE||vk==VK_NUMLOCK||vk==VK_CAPITAL||vk==VK_SHIFT||vk==VK_CONTROL||vk==VK_MENU||vk==VK_LBUTTON||vk==VK_RBUTTON||vk==VK_MBUTTON;
+        if(!invalid){g_settings.overlayToggleKey=vk;g_capturingOverlayKey=false;SetWindowTextW(hwnd,KeyName(vk).c_str());SetWindowTextW(g_status,L"Overlay toggle key assigned. Save to apply on next launch.");InvalidateRect(hwnd,nullptr,TRUE);return 0;}
+        return 0;
+    }
     if((msg==WM_KEYDOWN||msg==WM_SYSKEYDOWN)&&g_capturingKey>=0){
         if(lp&(1LL<<30))return 0;
         const int vk=CapturedVirtualKey(msg,wp,lp);
@@ -206,12 +250,16 @@ void LoadSettings() {
     g_settings.warmShaders = IniBool(L"WarmShaders", true);
     g_settings.fastShaders = IniBool(L"FastShaders", true);
     g_settings.inputPollRateHz = IniInt(L"Performance", L"InputPollHz", 1000, cfg.c_str());
+    g_settings.drawDiagnostics = IniInt(L"Performance", L"DrawDiagnostics", 0, cfg.c_str()) != 0;
+    g_settings.consoleLogs = IniInt(L"Performance", L"ConsoleLogs", 0, cfg.c_str()) != 0;
     if (std::find(kInputPollRates.begin(), kInputPollRates.end(), g_settings.inputPollRateHz) == kInputPollRates.end())
         g_settings.inputPollRateHz = 1000;
     g_settings.hardware = IniInt(L"Game", L"HardwareRenderer", 1, cfg.c_str()) != 0;
     g_settings.closeOnLaunch = IniInt(L"Launcher", L"CloseOnLaunch", 1, cfg.c_str()) != 0;
     const wchar_t* overlayKeys[8]{L"FPS",L"FrameTime",L"CPUUsage",L"GPUUsage",L"SystemRAM",L"GPUMemory",L"CPUTemperature",L"GPUTemperature"};
     for(int i=0;i<8;++i)g_settings.overlay[i]=IniInt(L"Overlay",overlayKeys[i],i<2?1:0,cfg.c_str())!=0;
+    g_settings.overlayEnabled=IniInt(L"Overlay",L"Enabled",1,cfg.c_str())!=0;
+    g_settings.overlayToggleKey=IniInt(L"Overlay",L"ToggleKey",VK_F10,cfg.c_str());
     wchar_t saveRoot[MAX_PATH]{};
     GetPrivateProfileStringW(L"Game", L"SaveRoot", L"", saveRoot, MAX_PATH, cfg.c_str());
     g_settings.saveRoot = saveRoot;
@@ -235,10 +283,14 @@ void SaveSettings() {
     put(L"Performance",L"FastShaders",g_settings.fastShaders);
     swprintf_s(number, L"%d", g_settings.inputPollRateHz);
     WritePrivateProfileStringW(L"Performance", L"InputPollHz", number, cfg.c_str());
+    put(L"Performance",L"DrawDiagnostics",g_settings.drawDiagnostics);
+    put(L"Performance",L"ConsoleLogs",g_settings.consoleLogs);
     put(L"Game",L"HardwareRenderer",g_settings.hardware);
     put(L"Launcher",L"CloseOnLaunch",g_settings.closeOnLaunch);
     const wchar_t* overlayKeys[8]{L"FPS",L"FrameTime",L"CPUUsage",L"GPUUsage",L"SystemRAM",L"GPUMemory",L"CPUTemperature",L"GPUTemperature"};
     for(int i=0;i<8;++i){wchar_t value[2]{g_settings.overlay[i]?L'1':L'0',L'\0'};WritePrivateProfileStringW(L"Overlay",overlayKeys[i],value,cfg.c_str());}
+    put(L"Overlay",L"Enabled",g_settings.overlayEnabled);
+    swprintf_s(number,L"%d",g_settings.overlayToggleKey);WritePrivateProfileStringW(L"Overlay",L"ToggleKey",number,cfg.c_str());
     WritePrivateProfileStringW(L"Game",L"SaveRoot",g_settings.saveRoot.c_str(),cfg.c_str());
     const wchar_t* keyNames[24]{L"Up",L"Down",L"Left",L"Right",L"A",L"B",L"X",L"Y",L"LB",L"RB",L"LT",L"RT",L"LS",L"RS",L"Start",L"Back",L"LSUp",L"LSDown",L"LSLeft",L"LSRight",L"RSUp",L"RSDown",L"RSLeft",L"RSRight"};
     for(int i=0;i<24;++i){swprintf_s(number,L"0x%02X",unsigned(g_settings.keys[i]));WritePrivateProfileStringW(L"Keyboard",keyNames[i],number,runtime.c_str());swprintf_s(number,L"0x%02X",unsigned(g_settings.keys2[i]));WritePrivateProfileStringW(L"Keyboard2",keyNames[i],number,runtime.c_str());}
@@ -288,10 +340,36 @@ std::wstring FromUtf8(const std::string& value) {
     const int n=MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,value.data(),int(value.size()),nullptr,0);if(n<=0)return L"";
     std::wstring result(size_t(n),L'\0');MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,value.data(),int(value.size()),result.data(),n);return result;
 }
+std::string RankedBody(const std::wstring& response) {
+    const size_t at=response.find(L"\r\n");return at==std::wstring::npos?std::string{}:Utf8(response.substr(at+2));
+}
+std::string JsonField(const std::string& json,const char* key) {
+    const std::string marker=std::string("\"")+key+"\"";size_t at=json.find(marker);
+    if(at==std::string::npos||(at=json.find(':',at+marker.size()))==std::string::npos)return {};
+    ++at;while(at<json.size()&&(json[at]==' '||json[at]=='\t'||json[at]=='\r'||json[at]=='\n'))++at;
+    if(at>=json.size())return {};
+    if(json[at]=='\"'){
+        std::string out;for(++at;at<json.size();++at){if(json[at]=='\"')return out;if(json[at]=='\\'&&at+1<json.size())++at;out.push_back(json[at]);}return {};
+    }
+    size_t end=at;while(end<json.size()&&json[end]!=','&&json[end]!='}'&&json[end]!=']')++end;
+    while(end>at&&(json[end-1]==' '||json[end-1]=='\r'||json[end-1]=='\n'))--end;
+    return json.substr(at,end-at);
+}
+double JsonNumber(const std::string& json,const char* key,double fallback=0.0) {
+    const std::string text=JsonField(json,key);if(text.empty())return fallback;
+    char* end=nullptr;const double result=std::strtod(text.c_str(),&end);return end&&*end=='\0'?result:fallback;
+}
 std::string RedactMatchToken(std::string body) {
-    const std::string key="\"match_token\"";size_t at=body.find(key);if(at==std::string::npos)return body;
-    at=body.find(':',at+key.size());if(at==std::string::npos)return body;at=body.find('\"',at+1);if(at==std::string::npos)return body;
-    const size_t end=body.find('\"',at+1);if(end!=std::string::npos)body.replace(at+1,end-at-1,"[hidden]");return body;
+    for(const char* field:{"match_token","session_key","session_key_bytes","opponent_endpoint"}){
+        const std::string key=std::string("\"")+field+"\"";size_t at=body.find(key);if(at==std::string::npos)continue;
+        at=body.find(':',at+key.size());if(at==std::string::npos)continue;at=body.find('\"',at+1);if(at==std::string::npos)continue;
+        const size_t end=body.find('\"',at+1);if(end!=std::string::npos)body.replace(at+1,end-at-1,"[hidden]");
+    }
+    return body;
+}
+std::wstring SafeRankedDisplay(const std::wstring& response) {
+    const size_t split=response.find(L"\r\n");
+    return split==std::wstring::npos?response:response.substr(0,split+2)+FromUtf8(RedactMatchToken(RankedBody(response)));
 }
 std::wstring RankedRequest(const std::wstring& base,const std::wstring& bearer,const std::wstring& route,const std::string& payload) {
     URL_COMPONENTSW parts{};parts.dwStructSize=sizeof(parts);parts.dwSchemeLength=DWORD(-1);parts.dwHostNameLength=DWORD(-1);parts.dwUrlPathLength=DWORD(-1);parts.dwExtraInfoLength=DWORD(-1);
@@ -315,7 +393,7 @@ std::wstring RankedRequest(const std::wstring& base,const std::wstring& bearer,c
     if(received){DWORD available=0;while(WinHttpQueryDataAvailable(request,&available)&&available){if(body.size()+available>16384){body="Response exceeded the 16 KB limit.";break;}const size_t offset=body.size();body.resize(offset+available);DWORD read=0;if(!WinHttpReadData(request,body.data()+offset,available,&read)){body="Could not read the server response.";break;}body.resize(offset+read);if(!read)break;}}
     WinHttpCloseHandle(request);WinHttpCloseHandle(connection);WinHttpCloseHandle(session);
     if(!received)return L"Request failed or timed out. Check the URL and server.";
-    body=RedactMatchToken(body);return L"HTTP "+std::to_wstring(status)+L"\r\n"+FromUtf8(body);
+    return L"HTTP "+std::to_wstring(status)+L"\r\n"+FromUtf8(body);
 }
 std::string NewPlayerId() {
     wchar_t username[128]{};
@@ -363,23 +441,118 @@ void StartRankedRegistration() {
     const std::string payload=std::string("{\"player\":\"")+player+"\"}";
     std::thread([target,base,payload]{auto* result=new RankedRegistrationResult{RankedRequest(base,L"",L"/v1/register",payload)};if(!PostMessageW(target,WM_RANKED_REGISTER_COMPLETE,0,reinterpret_cast<LPARAM>(result)))delete result;}).detach();
 }
-void StartRankedRequest(int action) {
+void LockRankedChallenge(bool locked) {
+    for(HWND h:g_nav)if(h)EnableWindow(h,!locked);
+    if(g_play)EnableWindow(g_play,!locked);
+    if(HWND save=GetDlgItem(g_window,ID_SAVE))EnableWindow(save,!locked);
+    for(HWND h:g_page)if(h)EnableWindow(h,!locked);
+    for(int id:{ID_RANKED_HEALTH,ID_RANKED_REGISTER,ID_RANKED_PROFILE,ID_RANKED_QUEUE,ID_RANKED_STATUS,ID_RANKED_CANCEL})
+        if(HWND h=GetDlgItem(g_window,id))EnableWindow(h,!locked);
+    if(g_challengeAccept)EnableWindow(g_challengeAccept,locked&&!g_acceptSubmitted);
+    if(g_challengeDecline)EnableWindow(g_challengeDecline,locked&&!g_acceptSubmitted);
+}
+void UpdateQueueCooldown() {
+    const double remaining=std::max(0.0,std::chrono::duration<double>(g_queueCooldownUntil-std::chrono::steady_clock::now()).count());
+    if(HWND queue=GetDlgItem(g_window,ID_RANKED_QUEUE))EnableWindow(queue,remaining<=0.0);
+    if(remaining>0.0)SetTimer(g_window,ID_COOLDOWN_TIMER,1000,nullptr);
+    else KillTimer(g_window,ID_COOLDOWN_TIMER);
+}
+void CloseChallenge() {
+    KillTimer(g_window,ID_CHALLENGE_TIMER);
+    for(HWND* h:{&g_challengePanel,&g_challengeTitle,&g_challengeOpponent,&g_challengeRating,
+                 &g_challengeDisconnect,&g_challengeTime,&g_challengeProgress,&g_challengeAccept,&g_challengeDecline})
+        if(*h){DestroyWindow(*h);*h=nullptr;}
+    g_pendingMatchId.clear();g_acceptSubmitted=false;LockRankedChallenge(false);
+}
+HWND ChallengeStatic(const wchar_t* text,int x,int y,int w,int h,HFONT font) {
+    HWND control=CreateWindowExW(0,L"STATIC",text,WS_CHILD|WS_VISIBLE|SS_LEFT|SS_NOPREFIX,
+        x,y,w,h,g_window,nullptr,GetModuleHandleW(nullptr),nullptr);
+    if(control&&font)SendMessageW(control,WM_SETFONT,(WPARAM)font,TRUE);
+    return control;
+}
+void LayoutChallenge() {
+    if(!g_challengePanel)return;
+    RECT client{};GetClientRect(g_window,&client);
+    const int width=(std::min)(520,(std::max)(420,int(client.right)-80)),height=310;
+    const int x=(client.right-width)/2,y=(g_viewportTop+g_viewportBottom-height)/2;
+    const int left=x+28,inner=width-56;
+    MoveWindow(g_challengePanel,x,y,width,height,TRUE);
+    MoveWindow(g_challengeTitle,left,y+22,inner,34,TRUE);
+    MoveWindow(g_challengeOpponent,left,y+78,inner,25,TRUE);
+    MoveWindow(g_challengeRating,left,y+108,inner,24,TRUE);
+    MoveWindow(g_challengeDisconnect,left,y+136,inner,24,TRUE);
+    MoveWindow(g_challengeTime,left,y+174,inner,26,TRUE);
+    MoveWindow(g_challengeProgress,left,y+207,inner,18,TRUE);
+    MoveWindow(g_challengeAccept,left,y+246,inner/2-8,40,TRUE);
+    MoveWindow(g_challengeDecline,left+inner/2+8,y+246,inner/2-8,40,TRUE);
+}
+void ShowChallenge(const std::string& body,bool updateDeadline) {
+    const std::string matchId=JsonField(body,"match_id");
+    if(matchId.empty())return;
+    const double seconds=(std::max)(0.0,(std::min)(12.0,JsonNumber(body,"time_remaining",12.0)));
+    if(!g_challengePanel){
+        RECT client{};GetClientRect(g_window,&client);
+        const int width=(std::min)(520,(std::max)(420,int(client.right)-80)),height=310;
+        const int x=(client.right-width)/2,y=(g_viewportTop+g_viewportBottom-height)/2;
+        g_challengePanel=CreateWindowExW(WS_EX_CLIENTEDGE,L"STATIC",L"",WS_CHILD|WS_VISIBLE|SS_NOTIFY,
+            x,y,width,height,g_window,nullptr,GetModuleHandleW(nullptr),nullptr);
+        const int left=x+28,inner=width-56;
+        g_challengeTitle=ChallengeStatic(L"CHALLENGER FOUND!",left,y+22,inner,34,g_headingFont);
+        g_challengeOpponent=ChallengeStatic(L"Opponent",left,y+78,inner,25,g_bodyFont);
+        g_challengeRating=ChallengeStatic(L"Rating",left,y+108,inner,24,g_bodyFont);
+        g_challengeDisconnect=ChallengeStatic(L"Disconnection rate",left,y+136,inner,24,g_bodyFont);
+        g_challengeTime=ChallengeStatic(L"Time remaining",left,y+174,inner,26,g_sectionFont);
+        g_challengeProgress=CreateWindowExW(0,PROGRESS_CLASSW,L"",WS_CHILD|WS_VISIBLE|PBS_SMOOTH,
+            left,y+207,inner,18,g_window,(HMENU)(INT_PTR)0,GetModuleHandleW(nullptr),nullptr);
+        if(g_challengeProgress){SendMessageW(g_challengeProgress,PBM_SETRANGE32,0,1200);SendMessageW(g_challengeProgress,PBM_SETBARCOLOR,0,kRed);}
+        g_challengeAccept=CreateWindowExW(0,L"BUTTON",L"ACCEPT MATCH",WS_CHILD|WS_VISIBLE|BS_OWNERDRAW|WS_TABSTOP,
+            left,y+246,inner/2-8,40,g_window,(HMENU)(INT_PTR)ID_RANKED_ACCEPT,GetModuleHandleW(nullptr),nullptr);
+        g_challengeDecline=CreateWindowExW(0,L"BUTTON",L"DECLINE",WS_CHILD|WS_VISIBLE|BS_OWNERDRAW|WS_TABSTOP,
+            left+inner/2+8,y+246,inner/2-8,40,g_window,(HMENU)(INT_PTR)ID_RANKED_DECLINE,GetModuleHandleW(nullptr),nullptr);
+        for(HWND control:{g_challengeAccept,g_challengeDecline})if(control)SendMessageW(control,WM_SETFONT,(WPARAM)g_bodyFont,TRUE);
+        LockRankedChallenge(true);
+        SetTimer(g_window,ID_CHALLENGE_TIMER,50,nullptr);
+    }
+    LayoutChallenge();
+    g_pendingMatchId=FromUtf8(matchId);
+    if(updateDeadline)g_acceptDeadline=std::chrono::steady_clock::now()+std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<double>(seconds));
+    std::string playerId;
+    const size_t opponentAt=body.find("\"opponent\"");
+    if(opponentAt!=std::string::npos)playerId=JsonField(body.substr(opponentAt),"player_id");
+    std::string rating="—",disconnect="—";
+    if(opponentAt!=std::string::npos){const std::string section=body.substr(opponentAt);const std::string r=JsonField(section,"rating"),d=JsonField(section,"disconnect_rate");if(!r.empty())rating=r;if(!d.empty()){char* end=nullptr;double value=std::strtod(d.c_str(),&end);if(end&&*end=='\0')disconnect=std::to_string(int(value*100+0.5))+"%";}}
+    SetWindowTextW(g_challengeOpponent,(L"Opponent: "+FromUtf8(playerId)).c_str());
+    SetWindowTextW(g_challengeRating,(L"Rating: "+FromUtf8(rating)).c_str());
+    SetWindowTextW(g_challengeDisconnect,(L"Disconnection rate: "+FromUtf8(disconnect)).c_str());
+    InvalidateRect(g_window,nullptr,FALSE);
+}
+void StartRankedAsync(const std::wstring& route,const std::string& payload,int action) {
     if(g_rankedBusy.exchange(true))return;
-    const std::wstring base=ControlText(ID_RANKED_URL),token=ControlText(ID_RANKED_TOKEN),build=ControlText(ID_RANKED_BUILD),region=ControlText(ID_RANKED_REGION);
+    const std::wstring base=ControlText(ID_RANKED_URL),token=ControlText(ID_RANKED_TOKEN);
     SaveRankedSettings();
+    for(int id:{ID_RANKED_HEALTH,ID_RANKED_REGISTER,ID_RANKED_PROFILE,ID_RANKED_QUEUE,ID_RANKED_STATUS,ID_RANKED_CANCEL})
+        if(HWND h=GetDlgItem(g_window,id))EnableWindow(h,FALSE);
+    SetWindowTextW(GetDlgItem(g_window,ID_RANKED_RESULT),L"Contacting ranked service...");
+    const HWND target=g_window;
+    std::thread([target,base,token,route,payload,action]{
+        auto* result=new std::wstring(RankedRequest(base,token,route,payload));
+        if(!PostMessageW(target,WM_APP+6,WPARAM(action),LPARAM(result)))delete result;
+    }).detach();
+}
+void StartRankedRequest(int action) {
+    const std::wstring build=ControlText(ID_RANKED_BUILD),region=ControlText(ID_RANKED_REGION);
     std::wstring route;std::string payload;
     switch(action){case ID_RANKED_HEALTH:route=L"/healthz";break;
     case ID_RANKED_PROFILE:route=L"/v1/profile";payload="{}";break;
-    case ID_RANKED_QUEUE:route=L"/v1/queue";payload="{\"build\":"+JsonString(build)+",\"region\":"+JsonString(region)+"}";break;
-    case ID_RANKED_STATUS:route=L"/v1/status";payload="{\"build\":"+JsonString(build)+",\"region\":"+JsonString(region)+"}";break;
-    case ID_RANKED_CANCEL:route=L"/v1/cancel";payload="{}";break;default:g_rankedBusy=false;return;}
-    for(HWND h:{GetDlgItem(g_window,ID_RANKED_HEALTH),GetDlgItem(g_window,ID_RANKED_REGISTER),GetDlgItem(g_window,ID_RANKED_PROFILE),GetDlgItem(g_window,ID_RANKED_QUEUE),GetDlgItem(g_window,ID_RANKED_STATUS),GetDlgItem(g_window,ID_RANKED_CANCEL)})if(h)EnableWindow(h,FALSE);
-    SetWindowTextW(GetDlgItem(g_window,ID_RANKED_RESULT),L"Contacting ranked service...");SetWindowTextW(g_status,L"Ranked service request in progress");
-    const HWND target=g_window;
-    std::thread([target,base,token,route,payload]{auto* result=new std::wstring(RankedRequest(base,token,route,payload));if(!PostMessageW(target,WM_APP+6,0,(LPARAM)result))delete result;}).detach();
+    case ID_RANKED_QUEUE:route=L"/v1/queue";payload="{\"build\":"+JsonString(build)+",\"region\":"+JsonString(region)+"}";g_rankedSearching=true;g_queueLeaseRenew=true;g_lastQueueRenew=std::chrono::steady_clock::now();SetTimer(g_window,ID_STATUS_TIMER,1000,nullptr);break;
+    case ID_RANKED_STATUS:route=L"/v1/status";payload="{}";break;
+    case ID_RANKED_CANCEL:route=L"/v1/cancel";payload="{}";g_rankedSearching=false;KillTimer(g_window,ID_STATUS_TIMER);break;default:return;}
+    SetWindowTextW(g_status,L"Ranked service request in progress");
+    StartRankedAsync(route,payload,action);
 }
 HWND Add(int id, const wchar_t* cls, const wchar_t* text, DWORD style, int x,int y,int w,int h,
          int layoutHeight=0) {
+    style|=WS_CLIPSIBLINGS;
     if (wcscmp(cls,L"BUTTON")==0 && id!=0) style=(style&~BS_TYPEMASK)|BS_OWNERDRAW|WS_TABSTOP;
     HWND control=CreateWindowExW(0,cls,text,WS_CHILD|WS_VISIBLE|style,x,y,w,h,g_window,(HMENU)(INT_PTR)id,
         GetModuleHandleW(nullptr),nullptr);
@@ -410,9 +583,9 @@ HWND Combo(int id,int x,int y,int width,const std::vector<std::wstring>& items,i
     Select(c,selected);
     return c;
 }
-HWND Check(int id,const wchar_t* text,int x,int y,bool checked) {
+HWND Check(int id,const wchar_t* text,int x,int y,bool checked,int width=0) {
     (void)checked;
-    return Add(id,L"BUTTON",text,BS_OWNERDRAW|WS_TABSTOP,x,y,(std::max)(160,g_contentX+g_contentWidth-x-2),28);
+    return Add(id,L"BUTTON",text,BS_OWNERDRAW|WS_TABSTOP,x,y,width>0?width:(std::max)(160,g_contentX+g_contentWidth-x-2),28);
 }
 void DestroyPage() { for(HWND c:g_page) if(IsWindow(c))DestroyWindow(c);g_page.clear();g_pageItems.clear();g_pageBottom=0; }
 void Heading(const wchar_t* title,const wchar_t* subtitle) {
@@ -432,6 +605,7 @@ void Field(const wchar_t* title,int y,int id,const std::vector<std::wstring>& op
 }
 void BuildPage() {
     g_capturingKey=-1;
+    g_capturingOverlayKey=false;
     if(g_tab==Online)SaveRankedSettings();
     DestroyPage();
     switch(g_tab) {
@@ -470,8 +644,11 @@ void BuildPage() {
         Field(L"Input polling rate",414,ID_INPUT_POLL_RATE,
               {L"250 Hz",L"500 Hz",L"750 Hz",L"1000 Hz",L"2000 Hz",L"4000 Hz",L"8000 Hz"},
               static_cast<int>(std::find(kInputPollRates.begin(), kInputPollRates.end(), g_settings.inputPollRateHz) - kInputPollRates.begin()));
-        Label(L"Samples controller and keyboard input at this rate. High rates use more CPU and may be limited by Windows scheduling; applies next launch.",
+        Label(L"Rates above 1000 Hz are capped by Windows/XInput to prevent excess CPU use; applies next launch.",
               g_contentX+2,456,840,36,true);
+        Check(ID_DRAW_DIAGNOSTICS,L"Collect detailed draw timings in the runtime log",g_contentX+2,500,g_settings.drawDiagnostics);
+        Label(L"Diagnostic mode adds overhead and may lower FPS. Enable briefly while reproducing a slowdown.",
+              g_contentX+26,530,900,26,true);
         break;
     case Game: {
         Heading(L"GAME",L"Game data, local saves and graphics device.");
@@ -492,11 +669,12 @@ void BuildPage() {
         Add(ID_SAVE_RESTORE,L"BUTTON",L"Restore latest backup",BS_PUSHBUTTON|WS_TABSTOP,g_contentX+168,519,190,34);
         break;
     }
-    case Advanced:
+    case Advanced: {
         Heading(L"ADVANCED",L"Launcher options, performance overlay and quick access to files.");
         SectionTitle(L"LAUNCHER",214);
-        Check(ID_CLOSE_ON_LAUNCH,L"Close this window after the game starts",g_contentX+2,253,g_settings.closeOnLaunch);
-        Label(L"The game can also be started again from its install folder.",g_contentX+26,283,760,25,true);
+        Check(ID_CLOSE_ON_LAUNCH,L"Close this window after the game starts",g_contentX+2,253,g_settings.closeOnLaunch,360);
+        Check(ID_CONSOLE_LOGS,L"Show runtime console logs",g_contentX+390,253,g_settings.consoleLogs,360);
+        Label(L"The console shows live messages; the log file continues saving in the background.",g_contentX+26,283,820,25,true);
         SectionTitle(L"FILES",332);
         Add(ID_OPEN_INSTALL,L"BUTTON",L"Open game folder",BS_PUSHBUTTON|WS_TABSTOP,g_contentX+2,374,170,36);
         Add(ID_OPEN_LOG,L"BUTTON",L"View latest log",BS_PUSHBUTTON|WS_TABSTOP,g_contentX+188,374,150,36);
@@ -505,12 +683,17 @@ void BuildPage() {
         Label(L"Log file: %LOCALAPPDATA%\\TTT2Recomp\\log.txt",g_contentX+2,422,790,28,true);
         SectionTitle(L"PERFORMANCE OVERLAY",450);
         Label(L"Choose the live metrics shown over the game. Temperature sensors may report unavailable on unsupported hardware.",g_contentX+2,484,850,36,true);
+        Add(ID_OVERLAY_ENABLE,L"BUTTON",L"Show performance overlay",BS_OWNERDRAW|WS_TABSTOP,g_contentX+2,526,260,26);
+        Label(L"Toggle key",g_contentX+280,526,90,26);
+        HWND overlayKey=Add(ID_OVERLAY_HOTKEY,L"BUTTON",KeyName(g_settings.overlayToggleKey).c_str(),BS_OWNERDRAW|WS_TABSTOP,g_contentX+370,526,180,26);
+        if(overlayKey)SetWindowSubclass(overlayKey,KeyCaptureSubclass,ID_OVERLAY_HOTKEY,0);
         {
             const wchar_t* overlayNames[8]{L"Frames per second",L"Frame-time graph",L"CPU usage",L"GPU usage",L"System RAM",L"GPU memory",L"CPU temperature",L"GPU temperature"};
             const int columnWidth=(g_contentWidth-24)/2;
-            for(int i=0;i<8;++i){const int col=i/4,row=i%4,x=g_contentX+2+col*(columnWidth+20),y=526+row*28;Add(ID_OVERLAY_FIRST+i,L"BUTTON",overlayNames[i],BS_OWNERDRAW|WS_TABSTOP,x,y,columnWidth,26);}
+            for(int i=0;i<8;++i){const int col=i/4,row=i%4,x=g_contentX+2+col*(columnWidth+20),y=560+row*28;Add(ID_OVERLAY_FIRST+i,L"BUTTON",overlayNames[i],BS_OWNERDRAW|WS_TABSTOP,x,y,columnWidth,26);}
         }
         break;
+    }
     case Controls: {
         Heading(L"CONTROLS",L"Click a binding and press the key you want. Changes apply on the next launch.");
         Add(ID_CONTROL_PLAYER1,L"BUTTON",L"PLAYER 1",BS_OWNERDRAW|WS_TABSTOP,g_contentX+2,210,150,34);
@@ -557,7 +740,8 @@ void BuildPage() {
     }
     }
     ReflowPage(g_window);
-    InvalidateRect(g_window,nullptr,FALSE);
+    UpdateQueueCooldown();
+    RedrawWindow(g_window,nullptr,nullptr,RDW_INVALIDATE|RDW_ERASE|RDW_ALLCHILDREN|RDW_UPDATENOW);
 }
 void ReadControls() {
     auto sel=[&](int id,int old){HWND h=GetDlgItem(g_window,id);int n=(int)SendMessageW(h,CB_GETCURSEL,0,0);return n<0?old:n;};
@@ -600,7 +784,7 @@ std::filesystem::path LatestBackup() {
     return latest;
 }
 std::wstring Timestamp() { SYSTEMTIME t{};GetLocalTime(&t);wchar_t s[32]{};swprintf_s(s,L"%04u%02u%02u-%02u%02u%02u",t.wYear,t.wMonth,t.wDay,t.wHour,t.wMinute,t.wSecond);return s; }
-void LaunchGame() {
+void LaunchGame(const std::string* confirmedReservation=nullptr) {
     ReadControls();SaveSettings();
     const std::wstring exe=InstallDir()+L"\\"+kGameExe;
     const std::wstring image=InstallDir()+L"\\game\\tekken.img";
@@ -609,19 +793,44 @@ void LaunchGame() {
                     L"TTT2 Community Edition",MB_ICONERROR|MB_OK);return;
     }
     const std::array<const wchar_t*,6> scales{L"",L"1.0",L"1.25",L"1.5",L"2.0",L"3.0"};
-    SetEnv(L"TTT2_RENDER_SCALE",scales[g_settings.scale]);
-    SetEnv(L"TTT2_SHADER_ASYNC",g_settings.asyncShaders?L"1":L"0");
-    SetEnv(L"TTT2_SHADER_WARM",g_settings.warmShaders?L"1":L"0");
-    SetEnv(L"TTT2_SHADER_FAST",g_settings.fastShaders?L"1":L"0");
-    SetEnv(L"TTT2_GPU_HW",g_settings.hardware?L"1":L"0");
+    std::map<std::wstring,std::wstring,EnvCaseLess> env;
+    env[L"TTT2_RENDER_SCALE"]=scales[g_settings.scale];
+    env[L"TTT2_SHADER_ASYNC"]=g_settings.asyncShaders?L"1":L"0";
+    env[L"TTT2_SHADER_WARM"]=g_settings.warmShaders?L"1":L"0";
+    env[L"TTT2_SHADER_FAST"]=g_settings.fastShaders?L"1":L"0";
+    env[L"TTT2_GPU_HW"]=g_settings.hardware?L"1":L"0";
     unsigned overlayMask=0;for(unsigned i=0;i<g_settings.overlay.size();++i)if(g_settings.overlay[i])overlayMask|=1u<<i;
-    wchar_t overlayValue[24]{};swprintf_s(overlayValue,L"%u",overlayMask);SetEnv(L"TTT2_OVERLAY_MASK",overlayValue);
-    SetEnv(L"TTT2_FRAMETIME",g_settings.overlay[1]?L"1":nullptr);
-    SetEnv(L"TTT2_SAVE_ROOT",g_settings.saveRoot.c_str());
+    wchar_t overlayValue[24]{},hotkey[24]{};swprintf_s(overlayValue,L"%u",overlayMask);swprintf_s(hotkey,L"%d",g_settings.overlayToggleKey);
+    env[L"TTT2_OVERLAY_MASK"]=overlayValue;env[L"TTT2_FRAMETIME"]=g_settings.overlay[1]?L"1":L"";
+    env[L"TTT2_GPU_PROFILE"]=g_settings.drawDiagnostics?L"1":L"";
+    env[L"TTT2_CONSOLE_LOGS"]=g_settings.consoleLogs?L"1":L"";
+    env[L"TTT2_OVERLAY_ENABLED"]=g_settings.overlayEnabled?L"1":L"0";env[L"TTT2_OVERLAY_TOGGLE_KEY"]=hotkey;
+    env[L"TTT2_SAVE_ROOT"]=g_settings.saveRoot;
+    for(const wchar_t* name:{L"TTT2_RANKED_RUNTIME",L"TTT2_RANKED_CONFIRMED",L"TTT2_RANKED_MATCH_ID",L"TTT2_RANKED_SESSION_KEY",L"TTT2_RANKED_ROLE",L"TTT2_RANKED_PEER_ENDPOINT",L"TTT2_RANKED_RELAY_ENDPOINT",L"TTT2_RANKED_RELAY_TOKEN",L"TTT2_RANKED_MATCH_TOKEN",L"TTT2_RANKED_PLAYER",L"TTT2_RANKED_PEER_ID"})env[name]=L"";
+    if(confirmedReservation){
+        std::string matchId=JsonField(*confirmedReservation,"match_id");if(matchId.empty())matchId=JsonField(*confirmedReservation,"id");
+        std::string sessionKey=JsonField(*confirmedReservation,"session_key_bytes");if(sessionKey.empty())sessionKey=JsonField(*confirmedReservation,"session_key");
+        const std::string role=JsonField(*confirmedReservation,"role"),endpoint=JsonField(*confirmedReservation,"opponent_endpoint");
+        if(matchId.size()!=32||sessionKey.size()!=32||(role!="host"&&role!="guest")||endpoint.empty()){
+            MessageBoxW(g_window,L"The match is confirmed, but the service did not return a complete session reservation.",L"Ranked match",MB_ICONERROR|MB_OK);return;
+        }
+        env[L"TTT2_RANKED_RUNTIME"]=L"1";env[L"TTT2_RANKED_CONFIRMED"]=L"1";
+        env[L"TTT2_RANKED_MATCH_ID"]=FromUtf8(matchId);env[L"TTT2_RANKED_SESSION_KEY"]=FromUtf8(sessionKey);
+        env[L"TTT2_RANKED_ROLE"]=FromUtf8(role);env[L"TTT2_RANKED_PEER_ENDPOINT"]=FromUtf8(endpoint);
+        env[L"TTT2_RANKED_MATCH_TOKEN"]=FromUtf8(JsonField(*confirmedReservation,"match_token"));
+        const std::string localPlayer=JsonField(*confirmedReservation,"player_a");
+        const std::string otherPlayer=JsonField(*confirmedReservation,"player_b");
+        const bool isHost=role=="host";
+        env[L"TTT2_RANKED_PLAYER"]=FromUtf8(isHost?localPlayer:otherPlayer);
+        env[L"TTT2_RANKED_PEER_ID"]=FromUtf8(isHost?otherPlayer:localPlayer);
+        const std::string relayEndpoint=JsonField(*confirmedReservation,"relay_endpoint"),relayToken=JsonField(*confirmedReservation,"relay_token");
+        if(!relayEndpoint.empty()&&!relayToken.empty()){env[L"TTT2_RANKED_RELAY_ENDPOINT"]=FromUtf8(relayEndpoint);env[L"TTT2_RANKED_RELAY_TOKEN"]=FromUtf8(relayToken);}
+    }
+    auto environment=ChildEnvironment(env);
     std::wstring command=L"\""+exe+L"\"";
     std::vector<wchar_t> mutableCommand(command.begin(),command.end());mutableCommand.push_back(L'\0');
     STARTUPINFOW si{};si.cb=sizeof(si);PROCESS_INFORMATION pi{};
-    if(!CreateProcessW(exe.c_str(),mutableCommand.data(),nullptr,nullptr,FALSE,0,nullptr,InstallDir().c_str(),&si,&pi)){
+    if(!CreateProcessW(exe.c_str(),mutableCommand.data(),nullptr,nullptr,FALSE,CREATE_UNICODE_ENVIRONMENT,environment.data(),InstallDir().c_str(),&si,&pi)){
         MessageBoxW(g_window,L"Windows could not start the game. Check the game folder and permissions.",
                     L"TTT2 Community Edition",MB_ICONERROR|MB_OK);return;
     }
@@ -629,7 +838,7 @@ void LaunchGame() {
     if(g_settings.closeOnLaunch){CloseHandle(pi.hProcess);PostQuitMessage(0);return;}
     if(g_gameProcess)CloseHandle(g_gameProcess);
     g_gameProcess=pi.hProcess;EnableWindow(g_play,FALSE);
-    SetWindowTextW(g_status,L"Game is running");
+    SetWindowTextW(g_status,confirmedReservation?L"Ranked match launched.":L"Game is running");
     HANDLE waitHandle=nullptr;
     if(DuplicateHandle(GetCurrentProcess(),g_gameProcess,GetCurrentProcess(),&waitHandle,0,FALSE,DUPLICATE_SAME_ACCESS))
         std::thread([handle=waitHandle]{WaitForSingleObject(handle,INFINITE);CloseHandle(handle);PostMessageW(g_window,WM_APP+5,0,0);}).detach();
@@ -668,7 +877,33 @@ LRESULT CALLBACK Proc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
         MoveWindow(g_status,34,footer+24,460,26,TRUE);
         MoveWindow(GetDlgItem(hwnd,ID_SAVE),w-330,footer+18,120,38,TRUE);
         MoveWindow(g_play,w-190,footer+15,156,44,TRUE);
-        ReadControls();BuildPage();return 0;
+        ReadControls();BuildPage();
+        if(g_challengePanel){LockRankedChallenge(true);LayoutChallenge();}
+        return 0;
+    }
+    case WM_TIMER: {
+        if(wp==ID_STATUS_TIMER){
+            if(g_rankedSearching&&!g_rankedBusy.load()){
+                const auto now=std::chrono::steady_clock::now();
+                const int operation=g_queueLeaseRenew&&now-g_lastQueueRenew>=std::chrono::seconds(10)?ID_RANKED_QUEUE:ID_RANKED_STATUS;
+                StartRankedRequest(operation);
+            }
+            return 0;
+        }
+        if(wp==ID_COOLDOWN_TIMER){UpdateQueueCooldown();return 0;}
+        if(wp==ID_CHALLENGE_TIMER&&g_challengePanel){
+            const double remaining=std::max(0.0,std::chrono::duration<double>(g_acceptDeadline-std::chrono::steady_clock::now()).count());
+            wchar_t label[80]{};swprintf_s(label,L"Time remaining: %.1f seconds",remaining);
+            if(g_challengeTime)SetWindowTextW(g_challengeTime,label);
+            if(g_challengeProgress)SendMessageW(g_challengeProgress,PBM_SETPOS,WPARAM(remaining*100.0),0);
+            if(remaining<=0.0&&!g_acceptSubmitted&&!g_rankedBusy){
+                g_acceptSubmitted=true;LockRankedChallenge(true);
+                SetWindowTextW(g_challengeAccept,L"DECLINING...");
+                StartRankedAsync(L"/v1/matches/"+g_pendingMatchId+L"/decline","{}",ID_RANKED_DECLINE);
+            }
+            InvalidateRect(g_window,nullptr,FALSE);return 0;
+        }
+        break;
     }
     case WM_MOUSEWHEEL: {
         const int maxOffset=(std::max)(0,g_pageBottom-g_viewportBottom);
@@ -716,7 +951,11 @@ LRESULT CALLBACK Proc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
         if(bitmap)DeleteObject(bitmap);if(buffer)DeleteDC(buffer);EndPaint(hwnd,&paint);return 0;
     }
     case WM_CTLCOLORSTATIC: {
-        HDC dc=(HDC)wp;HWND c=(HWND)lp;SetBkMode(dc,TRANSPARENT);
+        HDC dc=(HDC)wp;HWND c=(HWND)lp;SetBkMode(dc,OPAQUE);
+        if(c==g_challengePanel){SetBkColor(dc,kPanel);return (LRESULT)g_panelBrush;}
+        if(c==g_challengeTitle||c==g_challengeOpponent||c==g_challengeRating||c==g_challengeDisconnect||c==g_challengeTime){
+            SetBkMode(dc,OPAQUE);SetBkColor(dc,kPanel);SetTextColor(dc,c==g_challengeTitle?kRed:kCream);return (LRESULT)g_panelBrush;
+        }
         SetBkMode(dc,OPAQUE);SetBkColor(dc,c==g_status?kSidebar:kBg);
         if((INT_PTR)GetPropW(c,L"ttt2.muted")){SetTextColor(dc,kMuted);return (LRESULT)g_darkBrush;}
         wchar_t text[64]{};GetWindowTextW(c,text,64);
@@ -730,15 +969,15 @@ LRESULT CALLBACK Proc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
     case WM_DRAWITEM: {
         auto* d=(DRAWITEMSTRUCT*)lp;const int id=(int)d->CtlID;
         if(d->CtlType==ODT_STATIC){HPEN p=CreatePen(PS_SOLID,1,kLine);auto old=(HPEN)SelectObject(d->hDC,p);MoveToEx(d->hDC,d->rcItem.left,d->rcItem.top,nullptr);LineTo(d->hDC,d->rcItem.right,d->rcItem.top);SelectObject(d->hDC,old);DeleteObject(p);return TRUE;}
-        const bool keyBinding=(id>=ID_KEY_FIRST&&id<ID_KEY_FIRST+24)||(id>=ID_KEY2_FIRST&&id<ID_KEY2_FIRST+24);
-        if(keyBinding){const bool waiting=g_capturingKey==((id>=ID_KEY2_FIRST)?id-ID_KEY2_FIRST:id-ID_KEY_FIRST);HBRUSH fill=CreateSolidBrush(waiting?RGB(53,47,43):kPanel);FillRect(d->hDC,&d->rcItem,fill);DeleteObject(fill);HPEN edge=CreatePen(PS_SOLID,(d->itemState&ODS_FOCUS)?2:1,waiting?kRed:kLine);HGDIOBJ oldPen=SelectObject(d->hDC,edge);HGDIOBJ oldBrush=SelectObject(d->hDC,GetStockObject(NULL_BRUSH));RoundRect(d->hDC,d->rcItem.left,d->rcItem.top,d->rcItem.right,d->rcItem.bottom,5,5);SelectObject(d->hDC,oldBrush);SelectObject(d->hDC,oldPen);DeleteObject(edge);RECT text=d->rcItem;text.left+=10;text.right-=28;SetBkMode(d->hDC,TRANSPARENT);SetTextColor(d->hDC,waiting?kRed:kCream);wchar_t value[80]{};GetWindowTextW(d->hwndItem,value,80);DrawTextW(d->hDC,value,-1,&text,DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS);const int cx=d->rcItem.right-15,cy=(d->rcItem.top+d->rcItem.bottom)/2;HPEN glyph=CreatePen(PS_SOLID,2,kMuted);oldPen=SelectObject(d->hDC,glyph);MoveToEx(d->hDC,cx-3,cy-4,nullptr);LineTo(d->hDC,cx+1,cy);LineTo(d->hDC,cx-3,cy+4);SelectObject(d->hDC,oldPen);DeleteObject(glyph);return TRUE;}
+        const bool keyBinding=(id>=ID_KEY_FIRST&&id<ID_KEY_FIRST+24)||(id>=ID_KEY2_FIRST&&id<ID_KEY2_FIRST+24)||id==ID_OVERLAY_HOTKEY;
+        if(keyBinding){const bool waiting=id==ID_OVERLAY_HOTKEY?g_capturingOverlayKey:g_capturingKey==((id>=ID_KEY2_FIRST)?id-ID_KEY2_FIRST:id-ID_KEY_FIRST);HBRUSH fill=CreateSolidBrush(waiting?RGB(53,47,43):kPanel);FillRect(d->hDC,&d->rcItem,fill);DeleteObject(fill);HPEN edge=CreatePen(PS_SOLID,(d->itemState&ODS_FOCUS)?2:1,waiting?kRed:kLine);HGDIOBJ oldPen=SelectObject(d->hDC,edge);HGDIOBJ oldBrush=SelectObject(d->hDC,GetStockObject(NULL_BRUSH));RoundRect(d->hDC,d->rcItem.left,d->rcItem.top,d->rcItem.right,d->rcItem.bottom,5,5);SelectObject(d->hDC,oldBrush);SelectObject(d->hDC,oldPen);DeleteObject(edge);RECT text=d->rcItem;text.left+=10;text.right-=28;SetBkMode(d->hDC,TRANSPARENT);SetTextColor(d->hDC,waiting?kRed:kCream);wchar_t value[80]{};GetWindowTextW(d->hwndItem,value,80);DrawTextW(d->hDC,value,-1,&text,DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS);const int cx=d->rcItem.right-15,cy=(d->rcItem.top+d->rcItem.bottom)/2;HPEN glyph=CreatePen(PS_SOLID,2,kMuted);oldPen=SelectObject(d->hDC,glyph);MoveToEx(d->hDC,cx-3,cy-4,nullptr);LineTo(d->hDC,cx+1,cy);LineTo(d->hDC,cx-3,cy+4);SelectObject(d->hDC,oldPen);DeleteObject(glyph);return TRUE;}
         const bool overlayCheck=id>=ID_OVERLAY_FIRST&&id<ID_OVERLAY_FIRST+8;
-        const bool checkbox=id==ID_ASYNC||id==ID_WARM||id==ID_FAST||id==ID_HARDWARE||id==ID_CLOSE_ON_LAUNCH||id==ID_PLAYER2_ENABLED||overlayCheck;
-        if(checkbox){const bool checked=id==ID_PLAYER2_ENABLED?g_settings.player2KeyboardEnabled:overlayCheck?g_settings.overlay[id-ID_OVERLAY_FIRST]:id==ID_ASYNC?g_settings.asyncShaders:id==ID_WARM?g_settings.warmShaders:id==ID_FAST?g_settings.fastShaders:id==ID_HARDWARE?g_settings.hardware:g_settings.closeOnLaunch;FillRect(d->hDC,&d->rcItem,g_darkBrush);RECT box{d->rcItem.left,d->rcItem.top+6,d->rcItem.left+16,d->rcItem.top+22};HBRUSH b=CreateSolidBrush(checked?kRed:kPanel);FillRect(d->hDC,&box,b);DeleteObject(b);HBRUSH edge=CreateSolidBrush(kLine);FrameRect(d->hDC,&box,edge);DeleteObject(edge);if(checked){HPEN p=CreatePen(PS_SOLID,2,kCream);auto old=(HPEN)SelectObject(d->hDC,p);MoveToEx(d->hDC,box.left+3,box.top+8,nullptr);LineTo(d->hDC,box.left+7,box.top+12);LineTo(d->hDC,box.left+13,box.top+4);SelectObject(d->hDC,old);DeleteObject(p);}RECT tx=d->rcItem;tx.left+=25;SetBkMode(d->hDC,TRANSPARENT);SetTextColor(d->hDC,kCream);wchar_t label[128]{};GetWindowTextW(d->hwndItem,label,128);DrawTextW(d->hDC,label,-1,&tx,DT_LEFT|DT_VCENTER|DT_SINGLELINE);return TRUE;}
+        const bool checkbox=id==ID_ASYNC||id==ID_WARM||id==ID_FAST||id==ID_DRAW_DIAGNOSTICS||id==ID_CONSOLE_LOGS||id==ID_HARDWARE||id==ID_CLOSE_ON_LAUNCH||id==ID_PLAYER2_ENABLED||id==ID_OVERLAY_ENABLE||overlayCheck;
+        if(checkbox){const bool checked=id==ID_PLAYER2_ENABLED?g_settings.player2KeyboardEnabled:id==ID_OVERLAY_ENABLE?g_settings.overlayEnabled:overlayCheck?g_settings.overlay[id-ID_OVERLAY_FIRST]:id==ID_ASYNC?g_settings.asyncShaders:id==ID_WARM?g_settings.warmShaders:id==ID_FAST?g_settings.fastShaders:id==ID_DRAW_DIAGNOSTICS?g_settings.drawDiagnostics:id==ID_CONSOLE_LOGS?g_settings.consoleLogs:id==ID_HARDWARE?g_settings.hardware:g_settings.closeOnLaunch;FillRect(d->hDC,&d->rcItem,g_darkBrush);RECT box{d->rcItem.left,d->rcItem.top+6,d->rcItem.left+16,d->rcItem.top+22};HBRUSH b=CreateSolidBrush(checked?kRed:kPanel);FillRect(d->hDC,&box,b);DeleteObject(b);HBRUSH edge=CreateSolidBrush(kLine);FrameRect(d->hDC,&box,edge);DeleteObject(edge);if(checked){HPEN p=CreatePen(PS_SOLID,2,kCream);auto old=(HPEN)SelectObject(d->hDC,p);MoveToEx(d->hDC,box.left+3,box.top+8,nullptr);LineTo(d->hDC,box.left+7,box.top+12);LineTo(d->hDC,box.left+13,box.top+4);SelectObject(d->hDC,old);DeleteObject(p);}RECT tx=d->rcItem;tx.left+=25;SetBkMode(d->hDC,TRANSPARENT);SetTextColor(d->hDC,kCream);wchar_t label[128]{};GetWindowTextW(d->hwndItem,label,128);DrawTextW(d->hDC,label,-1,&tx,DT_LEFT|DT_VCENTER|DT_SINGLELINE);return TRUE;}
         int pageIndex=-1;switch(id){case ID_HOME:pageIndex=0;break;case ID_GRAPHICS:pageIndex=1;break;case ID_PERFORMANCE:pageIndex=2;break;case ID_GAME:pageIndex=3;break;case ID_ADVANCED:pageIndex=4;break;case ID_CONTROLS:pageIndex=5;break;case ID_ONLINE:pageIndex=6;break;}const bool active=pageIndex>=0&&int(g_tab)==pageIndex;
-        const bool play=id==ID_PLAY;const bool controlTab=id==ID_CONTROL_PLAYER1||id==ID_CONTROL_PLAYER2;const bool selectedControl=id==ID_CONTROL_PLAYER1?g_controlPlayer==0:id==ID_CONTROL_PLAYER2&&g_controlPlayer==1;const bool primary=play;const COLORREF fill=primary?kRed:((active||(controlTab&&selectedControl))?RGB(47,34,39):kPanel);HBRUSH brush=CreateSolidBrush(fill);
+        const bool play=id==ID_PLAY;const bool challengeAccept=id==ID_RANKED_ACCEPT;const bool challengeDecline=id==ID_RANKED_DECLINE;const bool controlTab=id==ID_CONTROL_PLAYER1||id==ID_CONTROL_PLAYER2;const bool selectedControl=id==ID_CONTROL_PLAYER1?g_controlPlayer==0:id==ID_CONTROL_PLAYER2&&g_controlPlayer==1;const bool primary=play||challengeAccept;const COLORREF fill=challengeAccept?RGB(39,119,95):((active||(controlTab&&selectedControl))?RGB(47,34,39):kPanel);HBRUSH brush=CreateSolidBrush(fill);
         HPEN p=CreatePen(PS_SOLID,1,primary?kRed:kLine);auto oldPen=(HPEN)SelectObject(d->hDC,p);auto oldBrush=(HBRUSH)SelectObject(d->hDC,brush);RoundRect(d->hDC,d->rcItem.left,d->rcItem.top,d->rcItem.right,d->rcItem.bottom,8,8);SelectObject(d->hDC,oldBrush);SelectObject(d->hDC,oldPen);DeleteObject(p);DeleteObject(brush);
-        SetBkMode(d->hDC,TRANSPARENT);SetTextColor(d->hDC,(active||play||(controlTab&&selectedControl))?kCream:kMuted);
+        SetBkMode(d->hDC,TRANSPARENT);SetTextColor(d->hDC,(active||play||challengeAccept||challengeDecline||(controlTab&&selectedControl))?kCream:kMuted);
         HFONT f=(play||id==ID_SAVE)?g_bodyFont:g_smallFont;auto old=(HFONT)SelectObject(d->hDC,f);
         wchar_t text[128]{};GetWindowTextW(d->hwndItem,text,128);DrawTextW(d->hDC,text,-1,&d->rcItem,DT_CENTER|DT_VCENTER|DT_SINGLELINE);SelectObject(d->hDC,old);
         if(d->itemState&ODS_FOCUS){RECT r=d->rcItem;InflateRect(&r,-4,-4);DrawFocusRect(d->hDC,&r);}return TRUE;
@@ -750,7 +989,18 @@ LRESULT CALLBACK Proc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
         if(id==ID_PLAY){LaunchGame();return 0;}
         if(id==ID_CONTROL_PLAYER1||id==ID_CONTROL_PLAYER2){g_capturingKey=-1;g_controlPlayer=id==ID_CONTROL_PLAYER1?0:1;g_scrollOffset=0;BuildPage();return 0;}
         if(id==ID_PLAYER2_ENABLED){g_settings.player2KeyboardEnabled=!g_settings.player2KeyboardEnabled;InvalidateRect(GetDlgItem(hwnd,id),nullptr,TRUE);return 0;}
+        if(id==ID_OVERLAY_ENABLE){g_settings.overlayEnabled=!g_settings.overlayEnabled;InvalidateRect(GetDlgItem(hwnd,id),nullptr,TRUE);return 0;}
+        if(id==ID_OVERLAY_HOTKEY){g_capturingOverlayKey=true;SetWindowTextW(GetDlgItem(hwnd,id),L"PRESS A KEY...");SetFocus(GetDlgItem(hwnd,id));InvalidateRect(GetDlgItem(hwnd,id),nullptr,TRUE);SetWindowTextW(g_status,L"Press a key to toggle the performance overlay. Escape cancels.");return 0;}
         if((id>=ID_KEY_FIRST&&id<ID_KEY_FIRST+24)||(id>=ID_KEY2_FIRST&&id<ID_KEY2_FIRST+24)){g_controlPlayer=id>=ID_KEY2_FIRST?1:0;g_capturingKey=id-(g_controlPlayer?ID_KEY2_FIRST:ID_KEY_FIRST);SetWindowTextW(GetDlgItem(hwnd,id),L"PRESS A KEY...");SetFocus(GetDlgItem(hwnd,id));InvalidateRect(GetDlgItem(hwnd,id),nullptr,TRUE);SetWindowTextW(g_status,L"Press a key for this binding. Escape is reserved.");return 0;}
+        if(id==ID_RANKED_ACCEPT||id==ID_RANKED_DECLINE){
+            if(!g_challengePanel||g_pendingMatchId.empty()||g_acceptSubmitted)return 0;
+            g_acceptSubmitted=true;LockRankedChallenge(true);
+            if(id==ID_RANKED_ACCEPT){SetWindowTextW(g_challengeAccept,L"WAITING FOR OPPONENT...");SetWindowTextW(g_status,L"Accepted. Waiting for the other player.");
+                StartRankedAsync(L"/v1/matches/"+g_pendingMatchId+L"/accept","{}",ID_RANKED_ACCEPT);
+            }else{SetWindowTextW(g_challengeDecline,L"DECLINING...");
+                StartRankedAsync(L"/v1/matches/"+g_pendingMatchId+L"/decline","{}",ID_RANKED_DECLINE);}
+            return 0;
+        }
         if(id==ID_RANKED_REGISTER){StartRankedRegistration();return 0;}
         if(id==ID_RANKED_HEALTH||id==ID_RANKED_PROFILE||id==ID_RANKED_QUEUE||id==ID_RANKED_STATUS||id==ID_RANKED_CANCEL){StartRankedRequest(id);return 0;}
         if(id==ID_BROWSE){ChooseSaveFolder();return 0;}
@@ -766,15 +1016,71 @@ LRESULT CALLBACK Proc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
             return 0;
         }
         if(id>=ID_OVERLAY_FIRST&&id<ID_OVERLAY_FIRST+8){g_settings.overlay[id-ID_OVERLAY_FIRST]=!g_settings.overlay[id-ID_OVERLAY_FIRST];InvalidateRect(GetDlgItem(hwnd,id),nullptr,TRUE);return 0;}
-        if(id==ID_ASYNC||id==ID_WARM||id==ID_FAST||id==ID_HARDWARE||id==ID_CLOSE_ON_LAUNCH){if(id==ID_ASYNC)g_settings.asyncShaders=!g_settings.asyncShaders;else if(id==ID_WARM)g_settings.warmShaders=!g_settings.warmShaders;else if(id==ID_FAST)g_settings.fastShaders=!g_settings.fastShaders;else if(id==ID_HARDWARE)g_settings.hardware=!g_settings.hardware;else g_settings.closeOnLaunch=!g_settings.closeOnLaunch;InvalidateRect(GetDlgItem(hwnd,id),nullptr,TRUE);return 0;}
+        if(id==ID_ASYNC||id==ID_WARM||id==ID_FAST||id==ID_DRAW_DIAGNOSTICS||id==ID_CONSOLE_LOGS||id==ID_HARDWARE||id==ID_CLOSE_ON_LAUNCH){if(id==ID_ASYNC)g_settings.asyncShaders=!g_settings.asyncShaders;else if(id==ID_WARM)g_settings.warmShaders=!g_settings.warmShaders;else if(id==ID_FAST)g_settings.fastShaders=!g_settings.fastShaders;else if(id==ID_DRAW_DIAGNOSTICS)g_settings.drawDiagnostics=!g_settings.drawDiagnostics;else if(id==ID_CONSOLE_LOGS)g_settings.consoleLogs=!g_settings.consoleLogs;else if(id==ID_HARDWARE)g_settings.hardware=!g_settings.hardware;else g_settings.closeOnLaunch=!g_settings.closeOnLaunch;InvalidateRect(GetDlgItem(hwnd,id),nullptr,TRUE);return 0;}
         break;
     }
     case WM_APP+6: {
         std::unique_ptr<std::wstring> result(reinterpret_cast<std::wstring*>(lp));
-        if(GetDlgItem(hwnd,ID_RANKED_RESULT))SetWindowTextW(GetDlgItem(hwnd,ID_RANKED_RESULT),result->c_str());
-        for(int id:{ID_RANKED_HEALTH,ID_RANKED_REGISTER,ID_RANKED_PROFILE,ID_RANKED_QUEUE,ID_RANKED_STATUS,ID_RANKED_CANCEL})if(HWND h=GetDlgItem(hwnd,id))EnableWindow(h,TRUE);
+        const int action=int(wp);const std::string body=RankedBody(*result),state=JsonField(body,"state");
+        if(GetDlgItem(hwnd,ID_RANKED_RESULT)){const std::wstring display=SafeRankedDisplay(*result);SetWindowTextW(GetDlgItem(hwnd,ID_RANKED_RESULT),display.c_str());}
+        if(!g_challengePanel)for(int id:{ID_RANKED_HEALTH,ID_RANKED_REGISTER,ID_RANKED_PROFILE,ID_RANKED_QUEUE,ID_RANKED_STATUS,ID_RANKED_CANCEL})if(HWND h=GetDlgItem(hwnd,id))EnableWindow(h,TRUE);
         const bool validating=g_registrationValidation;g_registrationValidation=false;
-        SetWindowTextW(g_status,validating?(result->rfind(L"HTTP 200",0)==0?L"Token successfully generated and saved!":L"Token saved, but server validation failed."):L"Ranked service response received");g_rankedBusy=false;return 0;
+        if(validating){SetWindowTextW(g_status,result->rfind(L"HTTP 200",0)==0?L"Token successfully generated and saved!":L"Token saved, but server validation failed.");g_rankedBusy=false;return 0;}
+        if(action==ID_RANKED_ACCEPT&&state.empty()){
+            g_acceptSubmitted=false;LockRankedChallenge(true);
+            SetWindowTextW(g_status,L"Acceptance could not be confirmed. Checking status; you can retry.");
+            g_rankedBusy=false;return 0;
+        }
+        if(action==ID_RANKED_DECLINE&&state!="declined"){
+            if(g_closeAfterDecline){g_closeAfterDecline=false;g_rankedBusy=false;DestroyWindow(hwnd);return 0;}
+            g_acceptSubmitted=false;LockRankedChallenge(true);
+            SetWindowTextW(g_status,L"Could not confirm the decline. Checking the match status...");
+            g_rankedBusy=false;return 0;
+        }
+        if(action==ID_RANKED_DECLINE){
+            g_queueCooldownUntil=std::chrono::steady_clock::now()+std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<double>(JsonNumber(body,"cooldown",30.0)));
+            CloseChallenge();g_rankedSearching=false;KillTimer(hwnd,ID_STATUS_TIMER);
+            UpdateQueueCooldown();
+            SetWindowTextW(g_status,L"Match declined. 30-second matchmaking cooldown active.");
+            if(g_closeAfterDecline){g_closeAfterDecline=false;g_rankedBusy=false;DestroyWindow(hwnd);return 0;}
+        }else if(state=="pending_acceptance"){
+            g_queueLeaseRenew=false;
+            ShowChallenge(body,!g_challengePanel);
+            SetWindowTextW(g_status,g_acceptSubmitted?L"Accepted. Waiting for the other player.":L"Challenger found. Accept or decline before the timer expires.");
+        }else if(state=="confirmed"){
+            g_queueLeaseRenew=false;
+            CloseChallenge();g_rankedSearching=false;KillTimer(hwnd,ID_STATUS_TIMER);
+            if(JsonField(body,"session_key_bytes").empty()||JsonField(body,"opponent_endpoint").empty()||JsonField(body,"role").empty()){
+                SetWindowTextW(g_status,L"Match confirmed. Retrieving session details...");
+                g_rankedBusy=false;StartRankedAsync(L"/v1/status","{}",ID_RANKED_STATUS);return 0;
+            }
+            SetWindowTextW(g_status,L"Match confirmed! Launching Tekken Tag Tournament 2...");
+            g_rankedBusy=false;LaunchGame(&body);return 0;
+        }else if(state=="queued"){
+            g_queueLeaseRenew=true;
+            if(g_challengePanel){CloseChallenge();SetWindowTextW(g_status,L"Opponent declined or timed out. You are back in the queue.");}
+            else if(action==ID_RANKED_QUEUE)SetWindowTextW(g_status,L"Searching for an opponent...");
+        }else if(state=="cooldown"){
+            g_queueLeaseRenew=false;
+            g_queueCooldownUntil=std::chrono::steady_clock::now()+std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<double>(JsonNumber(body,"time_remaining",30.0)));
+            CloseChallenge();g_rankedSearching=false;KillTimer(hwnd,ID_STATUS_TIMER);
+            UpdateQueueCooldown();
+            SetWindowTextW(g_status,L"Match declined or expired. A short queue cooldown is active.");
+        }else if(state=="idle"&&action==ID_RANKED_STATUS){
+            g_queueLeaseRenew=false;
+            g_rankedSearching=false;KillTimer(hwnd,ID_STATUS_TIMER);SetWindowTextW(g_status,L"No active search or match.");
+        }else if(action==ID_RANKED_QUEUE&&state.empty()){
+            g_rankedSearching=false;KillTimer(hwnd,ID_STATUS_TIMER);SetWindowTextW(g_status,L"Ranked queue request failed. See the service response.");
+        }else if(action==ID_RANKED_STATUS&&state.empty()){
+            g_rankedSearching=false;KillTimer(hwnd,ID_STATUS_TIMER);SetWindowTextW(g_status,L"Ranked status request failed. See the service response.");
+        }else SetWindowTextW(g_status,L"Ranked service response received");
+        if(g_closeAfterDecline&&!g_challengePanel){g_closeAfterDecline=false;g_rankedBusy=false;DestroyWindow(hwnd);return 0;}
+        if(g_closeAfterDecline&&action!=ID_RANKED_DECLINE&&g_challengePanel){
+            g_rankedBusy=false;g_acceptSubmitted=true;
+            StartRankedAsync(L"/v1/matches/"+g_pendingMatchId+L"/decline","{}",ID_RANKED_DECLINE);return 0;
+        }
+        if(g_closeAfterDecline&&action==ID_RANKED_DECLINE){g_closeAfterDecline=false;g_rankedBusy=false;DestroyWindow(hwnd);return 0;}
+        g_rankedBusy=false;return 0;
     }
     case WM_RANKED_REGISTER_COMPLETE: {
         std::unique_ptr<RankedRegistrationResult> result(reinterpret_cast<RankedRegistrationResult*>(lp));
@@ -791,6 +1097,14 @@ LRESULT CALLBACK Proc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
         return 0;
     }
     case WM_APP+5: if(g_gameProcess){CloseHandle(g_gameProcess);g_gameProcess=nullptr;EnableWindow(g_play,TRUE);SetWindowTextW(g_status,L"Game closed");}return 0;
+    case WM_CLOSE:
+        if(g_challengePanel){
+            g_closeAfterDecline=true;
+            if(!g_rankedBusy){g_acceptSubmitted=true;LockRankedChallenge(true);
+                StartRankedAsync(L"/v1/matches/"+g_pendingMatchId+L"/decline","{}",ID_RANKED_DECLINE);}
+            return 0;
+        }
+        DestroyWindow(hwnd);return 0;
     case WM_GETMINMAXINFO: {auto* m=(MINMAXINFO*)lp;m->ptMinTrackSize.x=900;m->ptMinTrackSize.y=620;return 0;}
     case WM_DESTROY:
         if(g_tab==Online)SaveRankedSettings();

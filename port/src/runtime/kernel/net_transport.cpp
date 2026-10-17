@@ -8,6 +8,7 @@
 #include "net_transport.h"
 #include "steam_net.h"
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -15,6 +16,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "winmm.lib")
@@ -38,6 +40,9 @@ uint16_t g_requestedPort = 0;
 std::map<uint64_t, ENetAddress> g_addresses;
 std::map<uint64_t, ENetPeer*> g_peers;
 std::map<ENetPeer*, uint64_t> g_peerIds;
+struct RelayRoute { sockaddr_in endpoint{}; uint8_t token[16]{}; uint8_t role = 0; std::chrono::steady_clock::time_point firstSend{}; bool hasSent = false; bool fallback = false; };
+std::map<uint64_t, RelayRoute> g_relayRoutes;
+SOCKET g_relaySocket = INVALID_SOCKET;
 
 void FromSteam(uint64_t peer, bool reliable, const uint8_t* data, size_t size)
 {
@@ -60,6 +65,30 @@ void ReceiveLoop()
     ENetEvent event{};
     while (g_started.load())
     {
+        if (g_relaySocket != INVALID_SOCKET)
+        {
+            for (int i = 0; i < 32; ++i)
+            {
+                uint8_t wire[65536]; sockaddr_in from{}; int fromSize = sizeof(from);
+                const int n = recvfrom(g_relaySocket, reinterpret_cast<char*>(wire), sizeof(wire), 0, reinterpret_cast<sockaddr*>(&from), &fromSize);
+                if (n == SOCKET_ERROR) break;
+                if (n < 18) continue;
+                Receiver receiver = nullptr; uint64_t peer = 0; Channel channel{}; bool valid = false;
+                {
+                    std::lock_guard lock(g_mutex);
+                    for (const auto& [id, route] : g_relayRoutes)
+                    {
+                        if (route.endpoint.sin_addr.s_addr != from.sin_addr.s_addr || route.endpoint.sin_port != from.sin_port ||
+                            route.role == wire[16] || wire[16] < 1 || wire[16] > 2) continue;
+                        unsigned diff = 0; for (size_t b = 0; b < 16; ++b) diff |= route.token[b] ^ wire[b];
+                        if (diff) continue;
+                        peer = id; channel = wire[17] == kControlChannel ? Channel::Reliable : Channel::Unreliable;
+                        receiver = g_receiver; valid = true; break;
+                    }
+                }
+                if (valid && receiver && n > 18) receiver(peer, channel, wire + 18, size_t(n - 18));
+            }
+        }
         int result = 0;
         {
             std::lock_guard hostLock(g_hostMutex);
@@ -72,6 +101,8 @@ void ReceiveLoop()
             uint64_t id = IdForAddress(event.peer->address);
             g_peers[id] = event.peer;
             g_peerIds[event.peer] = id;
+            auto route = g_relayRoutes.find(id);
+            if (route != g_relayRoutes.end()) route->second.hasSent = false;
         }
         else if (event.type == ENET_EVENT_TYPE_RECEIVE)
         {
@@ -173,6 +204,8 @@ bool Start(Receiver receiver)
     // Preserve a stable local identity format consumed by XNADDR and the existing socket shim.
     g_local = kLoopTag | port;
     g_started = true;
+    g_relaySocket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (g_relaySocket != INVALID_SOCKET) { u_long nonblocking = 1; ioctlsocket(g_relaySocket, FIONBIO, &nonblocking); }
     std::thread(ReceiveLoop).detach();
     std::fprintf(stderr, "[net] %s listening on UDP port %u\n", backend, unsigned(port));
     return true;
@@ -193,11 +226,48 @@ bool RegisterPeer(uint64_t peer, const char* ipv4, uint16_t port)
     return true;
 }
 
+bool RegisterRelayPeer(uint64_t peer, const char* ipv4, uint16_t port, const uint8_t token[16], uint8_t role)
+{
+    if (!peer || !ipv4 || !*ipv4 || !port || !token || (role != 1 && role != 2) || g_steam) return false;
+    if (g_relaySocket == INVALID_SOCKET) return false;
+    sockaddr_in endpoint{}; endpoint.sin_family = AF_INET; endpoint.sin_port = htons(port);
+    if (InetPtonA(AF_INET, ipv4, &endpoint.sin_addr) != 1) return false;
+    RelayRoute route{}; route.endpoint = endpoint; route.role = role; std::memcpy(route.token, token, 16);
+    std::lock_guard lock(g_mutex); g_relayRoutes[peer] = route; return true;
+}
+
 bool Send(uint64_t peer, Channel channel, const void* data, size_t size)
 {
     if (g_steam) return steamnet::Send(peer, channel == Channel::Reliable, data, size);
     if (!g_started.load() || !data || size == 0 || size > 1024 * 1024) return false;
     std::lock_guard lock(g_mutex);
+    auto relay = g_relayRoutes.find(peer);
+    if (relay != g_relayRoutes.end())
+    {
+        RelayRoute& route = relay->second;
+        if (!route.hasSent) { route.firstSend = std::chrono::steady_clock::now(); route.hasSent = true; }
+        const auto elapsed = std::chrono::steady_clock::now() - route.firstSend;
+        auto direct = g_peers.find(peer);
+        const bool directReady = !route.fallback && direct != g_peers.end() && direct->second && direct->second->state == ENET_PEER_STATE_CONNECTED;
+        if (!directReady && elapsed >= std::chrono::milliseconds(500)) route.fallback = true;
+        if (route.fallback)
+        {
+            if (size > 65507 - 18) return false;
+            std::vector<uint8_t> packet(18 + size);
+            std::memcpy(packet.data(), route.token, 16); packet[16] = route.role;
+            packet[17] = channel == Channel::Reliable ? kControlChannel : kInputChannel;
+            std::memcpy(packet.data() + 18, data, size);
+            return sendto(g_relaySocket, reinterpret_cast<const char*>(packet.data()), static_cast<int>(packet.size()), 0,
+                          reinterpret_cast<const sockaddr*>(&route.endpoint), sizeof(route.endpoint)) == static_cast<int>(packet.size());
+        }
+        // Teach the relay this client's observed NAT endpoint during the direct-connect grace.
+        if (!route.fallback && !directReady)
+        {
+            uint8_t probe[19]{}; std::memcpy(probe, route.token, 16); probe[16] = route.role; probe[17] = kInputChannel; probe[18] = 0xFE;
+            (void)sendto(g_relaySocket, reinterpret_cast<const char*>(probe), sizeof(probe), 0,
+                         reinterpret_cast<const sockaddr*>(&route.endpoint), sizeof(route.endpoint));
+        }
+    }
     ENetPeer* connection = nullptr;
     auto found = g_peers.find(peer);
     if (found != g_peers.end()) connection = found->second;

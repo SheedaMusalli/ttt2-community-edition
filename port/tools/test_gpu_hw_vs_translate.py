@@ -43,9 +43,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--negative-control", action="store_true")
     parser.add_argument("--jobs", type=int, default=max(1, (os.cpu_count() or 2) // 2))
+    parser.add_argument("--shader-dir", type=Path, help="read captured vs_*.bin files from this directory")
     parser.add_argument("shaders", nargs="*", type=Path)
     args = parser.parse_args()
-    shaders = args.shaders or sorted((ROOT / "port/shaders").glob("vs_*.bin"))
+    if args.shaders and args.shader_dir:
+        parser.error("pass shader files or --shader-dir, not both")
+    shaders = args.shaders or sorted(((args.shader_dir or ROOT / "port/shaders").glob("vs_*.bin")))
     if not shaders:
         raise SystemExit("FAIL: no vertex shaders found in port/shaders")
     with tempfile.TemporaryDirectory(prefix="ttt2-hw-vs-") as temp:

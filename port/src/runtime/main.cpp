@@ -364,6 +364,13 @@ static std::string InstalledLayout(int argc)
     setDefault("TTT2_VFS_ROOT", narrow(dir + L"game"));
     setDefault("TTT2_GPU_HW", "1");
     setDefault("TTT2_FBDUMP", "0");
+    const char* consoleLogs = std::getenv("TTT2_CONSOLE_LOGS");
+    if (consoleLogs && std::strcmp(consoleLogs, "1") == 0 && (AllocConsole() || GetConsoleWindow()))
+    {
+        SetConsoleTitleW(L"Tekken Tag Tournament 2 — Runtime Logs");
+        _wfreopen(L"CONOUT$", L"w", stderr);
+        _wfreopen(L"CONOUT$", L"w", stdout);
+    }
     const HANDLE err = GetStdHandle(STD_ERROR_HANDLE);
     if (!err || err == INVALID_HANDLE_VALUE || GetFileType(err) == FILE_TYPE_UNKNOWN)
     {
@@ -392,23 +399,48 @@ static void StartLogWriter()
 {
     if (const char* e = std::getenv("TTT2_LOG_ASYNC"); e && *e == '0') return;
     const int fd = _fileno(stderr);
-    const HANDLE file = fd >= 0 ? reinterpret_cast<HANDLE>(_get_osfhandle(fd)) : INVALID_HANDLE_VALUE;
-    if (file == INVALID_HANDLE_VALUE || !file || GetFileType(file) != FILE_TYPE_DISK) return;
-    HANDLE target = nullptr, read = nullptr, write = nullptr;
-    if (!DuplicateHandle(GetCurrentProcess(), file, GetCurrentProcess(), &target, 0, FALSE, DUPLICATE_SAME_ACCESS)) return;
-    if (!CreatePipe(&read, &write, nullptr, 1 << 20)) { CloseHandle(target); return; }
+    const HANDLE current = fd >= 0 ? reinterpret_cast<HANDLE>(_get_osfhandle(fd)) : INVALID_HANDLE_VALUE;
+    const DWORD type = current && current != INVALID_HANDLE_VALUE ? GetFileType(current) : FILE_TYPE_UNKNOWN;
+    HANDLE target = nullptr, console = nullptr, read = nullptr, write = nullptr;
+    if (type == FILE_TYPE_DISK)
+    {
+        if (!DuplicateHandle(GetCurrentProcess(), current, GetCurrentProcess(), &target, 0, FALSE, DUPLICATE_SAME_ACCESS)) return;
+    }
+    else if (type == FILE_TYPE_CHAR && GetConsoleWindow() &&
+             std::getenv("TTT2_CONSOLE_LOGS") && std::strcmp(std::getenv("TTT2_CONSOLE_LOGS"), "1") == 0)
+    {
+        wchar_t local[MAX_PATH]{};
+        if (GetEnvironmentVariableW(L"LOCALAPPDATA", local, MAX_PATH))
+        {
+            const std::wstring folder = std::wstring(local) + L"\\TTT2Recomp";
+            CreateDirectoryW(folder.c_str(), nullptr);
+            target = CreateFileW((folder + L"\\log.txt").c_str(), GENERIC_WRITE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (target == INVALID_HANDLE_VALUE) target = nullptr;
+        }
+        if (!DuplicateHandle(GetCurrentProcess(), current, GetCurrentProcess(), &console, 0, FALSE, DUPLICATE_SAME_ACCESS))
+            console = nullptr;
+    }
+    if (!target && !console) return;
+    if (!CreatePipe(&read, &write, nullptr, 1 << 20))
+    {
+        if (target) CloseHandle(target);
+        if (console) CloseHandle(console);
+        return;
+    }
     const int pipeFd = _open_osfhandle(reinterpret_cast<intptr_t>(write), _O_WRONLY | _O_TEXT);
     if (pipeFd < 0 || _dup2(pipeFd, fd) != 0)
     {
         if (pipeFd >= 0) _close(pipeFd); else CloseHandle(write);
         CloseHandle(read);
-        CloseHandle(target);
+        if (target) CloseHandle(target);
+        if (console) CloseHandle(console);
         return;
     }
     _close(pipeFd);                     // fd 2 keeps its own duplicate of the write end
     SetStdHandle(STD_ERROR_HANDLE, reinterpret_cast<HANDLE>(_get_osfhandle(fd)));
     g_logPipeRead = read;
-    std::thread([read, target] {
+    std::thread([read, target, console] {
         static char buffer[1 << 16];
         for (;;)
         {
@@ -416,7 +448,8 @@ static void StartLogWriter()
             if (!ReadFile(read, buffer, sizeof(buffer), &n, nullptr) || !n) return;
             g_logWriting = true;
             DWORD written = 0;
-            WriteFile(target, buffer, n, &written, nullptr);
+            if (target) WriteFile(target, buffer, n, &written, nullptr);
+            if (console) WriteFile(console, buffer, n, &written, nullptr);
             g_logWriting = false;
         }
     }).detach();

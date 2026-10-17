@@ -34,6 +34,7 @@ inline void GWrite32(uint8_t* b,uint32_t a,uint32_t v){v=__builtin_bswap32(v);st
 int GuestFaultReport(EXCEPTION_POINTERS*) {return EXCEPTION_CONTINUE_SEARCH;}
 bool DiagSkinDescribe(uint32_t,char*,size_t) {return false;}
 #pragma comment(lib, "user32.lib")   // the presenter's window queries (GetClientRect ...)
+#pragma comment(lib, "gdi32.lib")    // shader warm-up progress window text and background
 #include "display_settings.h"
 namespace display_settings {   // the backend's display settings: windowed 1280x720 (render scale 1)
 const std::vector<Resolution>& Resolutions() { static const std::vector<Resolution> r{ { 1280, 720 } }; return r; }
@@ -74,9 +75,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--negative-control", action="store_true")
     parser.add_argument("--jobs", type=int, default=max(1, (os.cpu_count() or 2) // 2))
+    parser.add_argument("--shader-dir", type=Path, help="read captured ps_*.bin files from this directory")
     parser.add_argument("shaders", nargs="*", type=Path)
     args = parser.parse_args()
-    shaders = args.shaders or sorted((ROOT / "port/shaders").glob("ps_*.bin"))
+    if args.shaders and args.shader_dir:
+        parser.error("pass shader files or --shader-dir, not both")
+    shaders = args.shaders or sorted(((args.shader_dir or ROOT / "port/shaders").glob("ps_*.bin")))
     if not shaders:
         raise SystemExit("FAIL: no pixel shaders found in port/shaders")
     with tempfile.TemporaryDirectory(prefix="ttt2-hw-translate-") as temp:

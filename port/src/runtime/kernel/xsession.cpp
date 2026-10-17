@@ -8,6 +8,8 @@
 #include "kernel_trace.h"
 #include "profiles.h"
 #include "xlive.h"
+#include "kernel_content.h"
+#include "performance_overlay.h"
 #include "matchmaking.h"
 #include "ranked_adapter.h"
 #include <cstdio>
@@ -374,6 +376,41 @@ uint32_t ArbitrationRegister(uint8_t* base, uint32_t b)
     return S_OK_;
 }
 
+// Diagnostic-only capture of the XMsg dispatcher payload. The XMsg ABI gives us a guest
+// parameter-block pointer and byte length; the contents of XSessionWriteStats are intentionally
+// left opaque until their title-specific layout is verified.
+void DumpWriteStatsPayload(uint8_t* base, uint32_t buffer, uint32_t length)
+{
+    const uint64_t timestampMs = GetTickCount64();
+    const uint64_t frame = performance_overlay::PresentedFrameCount();
+    const uint32_t threadId = GetCurrentThreadId();
+    const uint32_t bytes = (std::min)(length, 256u);
+    std::fprintf(stderr,
+        "[xsession] XSessionWriteStats diagnostic: tid=%lu tick_ms=%llu presented_frame=%llu buffer=0x%08X length=%u dump=%u\n",
+        static_cast<unsigned long>(threadId), static_cast<unsigned long long>(timestampMs),
+        static_cast<unsigned long long>(frame), buffer, length, bytes);
+    if (!bytes) return;
+    if (!base || !buffer || !XamGuestRange(buffer, bytes, 1))
+    {
+        std::fprintf(stderr, "[xsession] XSessionWriteStats payload unavailable: invalid guest range\n");
+        return;
+    }
+
+    for (uint32_t offset = 0; offset < bytes; offset += 16)
+    {
+        char hex[16 * 3 + 1] = {};
+        char ascii[17] = {};
+        const uint32_t rowBytes = (std::min)(16u, bytes - offset);
+        for (uint32_t i = 0; i < rowBytes; ++i)
+        {
+            const uint8_t value = GRead8(base, buffer + offset + i);
+            std::snprintf(hex + i * 3, sizeof(hex) - i * 3, "%02X ", value);
+            ascii[i] = value >= 0x20 && value <= 0x7E ? static_cast<char>(value) : '.';
+        }
+        std::fprintf(stderr, "[xsession]   %04X  %-48s |%-16s|\n", offset, hex, ascii);
+    }
+}
+
 } // namespace
 
 // ---- session handles ------------------------------------------------------------------------------
@@ -459,8 +496,11 @@ uint32_t XgiDispatch(uint8_t* base, uint32_t msg, uint32_t b, uint32_t length, b
     case 0x000B001B: return SearchById(base, b);
     case 0x000B0020: return S_OK_;                           // XUserResetStatsView
     case 0x000B0021: return ReadStats(base, b);
-    case 0x000B0025: case 0x000B0026:                        // XSessionWriteStats / FlushStats: kept local
-        Log("writestats", "XSessionWriteStats / Flush (kept local)");
+    case 0x000B0025:                                         // XSessionWriteStats: diagnostic-only payload dump
+        DumpWriteStatsPayload(base, b, length);
+        return S_OK_;
+    case 0x000B0026:                                         // XSessionFlushStats: kept local
+        Log("flushstats", "XSessionFlushStats (kept local)");
         return S_OK_;
     default:
         handled = false;

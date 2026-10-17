@@ -29,6 +29,8 @@ ADAPTERS = r'''
 struct Fault { int code; };
 void* GetCurrentProcess() { return nullptr; }
 void TerminateProcess(void*, int code) { throw Fault{code}; }
+void LogDrain() {}
+void GpuProgress() {}
 std::array<uint8_t,0x80000> memory{};
 uint8_t* g_base=memory.data();
 uint32_t doorbell=0;

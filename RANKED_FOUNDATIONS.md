@@ -45,10 +45,18 @@ to distribute the entire project or game. Rights clearance remains unresolved.
   one queue entry per player, exact build/region matching, rating distance <= 200,
   30-second queue leases and reservations, both-player readiness, 15-minute match
   deadline, cancellation/abort, immutable result reports and idempotent Elo updates.
-- Ratings start at 1000, K=32. Only agreeing participant reports update both ratings
-  atomically. Disagreements, disconnect expiry and aborted matches award no points.
+- Ratings start at 1000, K=32. The service persists each match's participants, character
+  teams, score, winner, start/end times, status, and both rating deltas. Only identical
+  participant summaries update rating and wins/losses atomically; conflicting summaries
+  are marked `disputed` with zero deltas. Aborted or mutually expired matches do not rate.
   These are **provisional community ratings**: two colluding or modified clients can
-  fabricate agreement. This is not authoritative anti-cheat or original Tekken rank logic.
+  fabricate agreement. The service's displayed Dan tier is a provisional rating-derived
+  tier, not the game's official Dan progression or rank logic.
+- A walkover after one participant becomes unresponsive awards a provisional win to the
+  still-connected player, records the match as `disconnected`, increments the absent
+  player's `disconnect_count`, and updates `disconnect_rate` as disconnects divided by
+  completed rated games. The service cannot distinguish a malicious quit from a network
+  failure, so these penalties remain provisional.
 - Active matches record per-player heartbeats. Clients should heartbeat every 25 seconds;
   after 75 seconds without the opponent heartbeat, a participant may submit `/v1/forfeit`.
   The service waits a further 30 seconds before awarding a forfeit, and cancels the claim
@@ -74,22 +82,36 @@ the server binds to `127.0.0.1:8765`; `serve --host` and `serve --port` (also co
 through `TTT2_RANKED_HOST` and `TTT2_RANKED_PORT`) allow container/server binding. Database
 files are ignored by Git. Stop with Ctrl+C. No service is left running by tests.
 
-Every endpoint uses POST, JSON, and `Authorization: Bearer <player-token>`:
+Authenticated player operations use POST, JSON, and
+`Authorization: Bearer <player-token>`. The leaderboard and history GET routes are public:
 
 | Path | Body | Purpose |
 |---|---|---|
 | `/v1/profile` | `{}` | Own provisional rating and completed games |
-| `/v1/queue` | `{"build":"tu3-v1","region":"asia"}` | Join/renew 30-second lease or receive reserved match |
-| `/v1/status` | `{}` | Current reservation/active match, queued or idle; does not renew lease |
+| `/v1/queue` | `{"build":"tu3-v1","region":"asia"}` | Join/renew 30-second lease or receive a pending acceptance offer |
+| `/v1/status` | `{}` | Current acceptance/reservation/active match, queued, cooldown or idle; does not renew lease |
+| `/v1/matches/{id}/accept` | `{}` | Accept a pending match offer; both players must accept |
+| `/v1/matches/{id}/decline` | `{}` | Decline the offer, restore the opponent to queue and start cooldown |
 | `/v1/cancel` | `{}` | Remove queue entry; use abort for an existing match |
 | `/v1/match` | `{"match_id":"..."}` | Participant-only match status including terminal state |
 | `/v1/ready` | `{"match_id":"..."}` | Mark ready; both participants activate the match |
 | `/v1/report` | `{"match_id":"...","winner":"alice"}` | Participant ID or `draw`; immutable, retry-safe |
+| `/v1/matches/{match_id}/report` | `{"p1_chars":["Kazuya"],"p2_chars":["Jin"],"p1_score":3,"p2_score":1,"winner_id":"alice"}` | Submit full summary; both players must submit the same summary |
 | `/v1/abort` | `{"match_id":"..."}` | End reservation/active match without rating change |
 | `/v1/register` | `{"player":"player_name"}` | Create account and return bearer token (loopback by default; remote opt-in) |
+| `/v1/leaderboard?limit=50` | — | Top players ordered by rating, wins, and stable ID |
+| `/v1/players/{id}/history?limit=20` | — | Recent match ledger entries for a player |
 
-Queue again every ~10 seconds while searching. Poll status to receive a reservation;
-retain the match ID to inspect the final result. Build names are client-declared in this
+Each match report requires one or two character identifiers per player, integer scores from
+0 to 99, and a `winner_id` matching the score (`draw` requires equal scores). Reports are
+immutable. Repeating the same report is safe; a conflicting report marks the match disputed
+and does not change ratings. `disconnect_rate` is returned as a fraction from 0 to 1.
+
+The launcher checks status every second and renews its 30-second queue lease every 10 seconds.
+Other clients should also renew `/v1/queue` periodically while searching; `/v1/status` alone
+does not renew the queue lease. After a challenger is found, both players must accept within
+12 seconds before `/v1/status` returns connection details; retain the match ID to inspect the
+final result. Build names are client-declared in this
 prototype; a production adapter must derive a compatibility fingerprint from the actual
 game version, runtime version and protocol. No endpoints or secrets are embedded in game files.
 
@@ -283,6 +305,42 @@ control panel only: it does not hand reservations to the game or establish a fig
 The installer already embeds `TTT2 Launcher.exe`, installs it beside the game, and creates
 Desktop/Start shortcuts to the launcher by default; installer copy now calls this out.
 
+### Ranked match acceptance lifecycle (2026-10-17)
+
+Pairing now enters `pending_acceptance` for 12 seconds. The service records each participant's
+acceptance independently and returns the opponent's player ID, provisional rating and disconnect
+rate, plus the remaining time. It does not return the peer endpoint, role, match token or session
+key until both participants have accepted and the state changes to `confirmed`. This prevents a
+client from using a reservation before the other player has agreed.
+
+Authenticated service routes:
+
+| Route | Behavior |
+|---|---|
+| `GET /v1/status` | Read the caller's pending prompt, confirmed match, queue, cooldown or idle state. |
+| `POST /v1/matches/{id}/accept` | Record the caller's acceptance; the second acceptance confirms the match. An expired offer returns HTTP 408 after applying its timeout/requeue rules. |
+| `POST /v1/matches/{id}/decline` | End the pending offer, restore the other player to the queue using the original queue priority, and apply a 30-second cooldown to the decliner. |
+
+When only one client accepts and the countdown expires, that client is restored to the front of
+the queue and the non-accepting client receives a 30-second cooldown. If neither accepts, both
+receive the cooldown. The SQLite schema migration adds acceptance flags, deadlines, preserved
+queue timestamps and per-player cooldown timestamps to existing databases. Existing accepted
+matches retain their IDs and secrets in the database; secrets are exposed through status only for
+confirmed or legacy reserved/active matches.
+
+The launcher polls status asynchronously while matchmaking is active. Its “Challenger Found”
+dialog shows the opponent summary and countdown, supports accept/decline, locks the page controls,
+and sends a decline if the dialog is closed. The panel is repositioned on window resize. Both
+accepting changes the launcher state to confirmed, but does not start the game: the runtime's
+ranked session handoff is not implemented or validated. The acceptance feature is therefore a
+service/launcher lifecycle, not playable online matchmaking.
+
+Verification: `python -m unittest discover -s port/tools -p test_ranked_service.py -v` passes all
+31 service tests, including migration, pending-secret redaction, both accept paths, decline,
+timeout/requeue, cooldown and authenticated HTTP routes. The updated `ranked_e2e` harness now
+accepts both clients before reading the endpoint and session key; this local two-process harness
+still verifies signaling/transport only, not the game itself.
+
 The distribution README no longer instructs players to use Spacewar. Valve's Steamworks docs
 describe App ID 480 as the Spacewar example application; this project rejects it and the current
 build has no Steamworks SDK. No fake Xbox Live sign-in or game-license bypass was added. FSR and
@@ -308,6 +366,12 @@ The ranked service accepts an optional syntax-checked IPv4 `listen_endpoint`. Pa
 
 `net_transport.cpp` uses vendored ENet for numeric IPv4 peers, with sequenced-unreliable input and reliable ordered control channels. The runtime adapter is opt-in through `TTT2_RANKED_RUNTIME=1` and requires `TTT2_RANKED_SERVICE`, `TTT2_RANKED_TOKEN`, `TTT2_RANKED_PLAYER`, and for remote play a reachable `TTT2_RANKED_ADVERTISE_IP`. It registers the reservation endpoint and copies match/peer/session values into the host's current `XSESSION_INFO` representation. No Steamworks SDK, Spacewar identity, relay, public address discovery, or production matchmaking security is enabled. The guest session ABI and in-game flow remain unverified, so this is not a claim of playable online ranked mode.
 
+### XSessionWriteStats payload diagnostics (2026-10-17)
+
+XGI message `0x000B0025` now emits a read-only hex dump of at most the first 256 bytes of its incoming guest parameter buffer, then returns the same success status (`0`). The dump includes a byte offset, hex bytes, printable ASCII, Windows caller thread ID, `GetTickCount64()` milliseconds, and the runtime's presented-frame count. The frame value counts successfully presented frames since process start; it is not a title simulation-frame or match-state identifier. Invalid guest ranges are reported without dereferencing them. No guest memory is modified.
+
+The dispatcher call contract available in this runtime is `XMsgStartIORequest` PPC registers `r3=app`, `r4=message`, `r5=overlapped`, `r6=guest buffer`, and `r7=buffer length`; this capture applies when `app=0xFB` and `message=0x000B0025`. For `XMsgStartIORequestEx`, the same first five arguments are used by the shared handler. The handler receives `r6`/`r7` as `buffer`/`length`. The XGI message's inner `XSessionWriteStats` structure layout and any offsets within its payload are not yet known: the logger deliberately dumps the supplied block as opaque bytes and does not infer nested pointers or property IDs. No live game match capture has been validated in this development environment.
+
 ### Native build and test results (2026-10-17)
 
 Using the existing Visual Studio 2022 Build Tools CMake/Ninja/Clang-CL and v143 SDK, `tekken_recomp.exe`, `ttt2_setup.exe`, `ttt2_setup_probe.exe`, `ttt2_test_ranked_e2e.exe`, and `ttt2_test_xnet_route.exe` were built. CMake needed `VSINSTALLDIR` set to the Build Tools root so it could locate the CRT payload. The first compile found and fixed a Clang-CL string-copy error in `ranked_adapter.cpp` and a string concatenation error in the E2E test.
@@ -315,6 +379,16 @@ Using the existing Visual Studio 2022 Build Tools CMake/Ninja/Clang-CL and v143 
 The Python ranked-service suite passes all 16 tests. CTest `ranked_e2e` passes: two local processes acquire a reservation over HTTP, authenticate with ENet and exchange bidirectional messages. CTest `xnet_route` builds but fails at the child-process shutdown assertion: the server process does not exit before the harness timeout. That shutdown issue remains open. Successful compilation and the isolated E2E test do not prove a live game match works.
 
 The installer includes the rebuilt host game runtime and launcher resources, but still requires a user's legally obtained disc image and Title Update 3 to create installed game data.
+
+### UDP relay and RTT-based relay allocation (2026-10-17)
+
+Added the standalone `ttt2_relay_daemon` CMake target under `port/tools/relay_daemon`. It exposes an admin-token protected HTTP registration API on loopback by default and routes the 17-byte UDP envelope (16-byte random relay token plus one-byte player role) between the first observed endpoint for each side. Sessions are keyed by the relay token, associated with a match ID for registration/deletion, and expire after their configured TTL. Linux uses 32-message `recvmmsg`/`sendmmsg` batches and large socket buffers; Windows uses non-blocking WinSock readiness polling and `recvfrom`/`sendto`.
+
+`ranked_service.py` now accepts optional per-node `client_rtt_map` values on queue submission, validates their range, chooses the node minimizing worst-player RTT (then total RTT), persists a separate random relay token, and includes the relay endpoint/token only in confirmed match responses. If `TTT2_RELAY_REGISTER_URL` and `TTT2_RELAY_ADMIN_TOKEN` are configured, or a node supplies its own `register_url` in `TTT2_RELAY_NODES`, the service registers that confirmed match with the selected relay daemon. Configure nodes with `TTT2_RELAY_NODES` JSON (`[{"id":"region-a","endpoint":"203.0.113.10:9100","register_url":"http://10.0.0.5:9101"}]`); for a single relay, `TTT2_RELAY_ENDPOINT` is accepted. Clients may provide their measured RTT map using `TTT2_RELAY_RTT_MAP`.
+
+The Windows runtime now stores the confirmed relay endpoint and token, keeps sending direct ENet traffic during a 500 ms connection window, and then routes the virtual-socket datagrams over the relay framing if direct ENet has not connected. The relay route is locked for that peer once fallback starts. This routing code is experimental: the relay forwards opaque UDP datagrams and does not itself guarantee confidentiality, abuse resistance, competitive integrity, symmetric-NAT reachability, or playable game-session integration. Session acceptance, guest ABI behavior, and live match start remain unverified. The local socket test proves relay forwarding only.
+
+Verification on this Windows host: the Release relay daemon and runtime compile with Clang-CL/v143. `test_relay_daemon.py` passes registration, both forwarding directions, source-address translation, and teardown; CTest `relay_daemon` and `ranked_e2e` pass; the ranked-service suite passes 33 tests including RTT selection and input validation. Linux execution was not verified because WSL is not installed on this host.
 
 Build commands used:
 
@@ -372,6 +446,44 @@ The full CTest suite was also rerun after the v2.1 build: `rollback_loop`,
 child-process completion stage (`server exit 4` after 10 seconds); the harness does
 not complete the expected socket datagram round-trip, so XNet route integration is
 not validated and remains an open blocker.
+
+### v2.2.0 source update (2026-10-17)
+
+The launcher adds a configurable console-log toggle and clears the launcher canvas
+through the buffered repaint path to prevent stale text and overlapping controls. The
+runtime keeps installed diagnostics in the local log file when the console window is
+hidden. The performance overlay's visibility and toggle binding remain configurable.
+These UI changes have been compiled; visual behavior can vary with Windows DPI and
+display scaling.
+
+The ranked service records match participants, character teams, scores, winner,
+timestamps, terminal status and rating deltas. It exposes public leaderboard and player
+history queries, accepts mutually verified reports, records disputes without rating
+changes, and tracks provisional disconnect walkovers. Match offers require both clients
+to accept before connection details are disclosed. The launcher can hand a confirmed
+reservation to the runtime through child-process environment values, avoiding a second
+queue request. Result capture through XGI `0x000B0025` remains read-only and opaque; the
+authentic nested stats layout has not been identified.
+
+The runtime includes an experimental IPv4 ENet path and optional UDP relay fallback.
+The C++17 relay daemon has a protected HTTP session-registration endpoint, TTL cleanup,
+and platform-specific batch receive paths. The service can select a configured relay
+from client RTT maps. Automated loopback tests cover service acceptance, ledger behavior,
+reservation handoff, and relay datagram forwarding. These tests do not verify Tekken's
+full in-game session ABI, public NAT traversal, or a playable remote ranked match.
+
+The current build also retains the local save-container fix, launcher input/display
+settings, Player 1/Player 2 keyboard controls, high-rate polling selections, shader-cache
+warm-up, and selectable performance-overlay metrics. Polling selections above 1000 Hz
+do not make the host API deliver new controller samples at those rates; the game still
+runs on its approximately 60 Hz simulation loop. Performance changes are not a guarantee
+that every stage or match scene will hold a fixed frame rate, and stage-wide graphical
+validation remains incomplete.
+
+Version metadata is set to `2.2.0` for the runtime and launcher build. The public GitHub
+release is source-only: the repository's distribution policy excludes game-derived
+executables and installers from public assets. GitHub-generated source archives remain
+available for contributors to build locally with their own lawful game inputs.
 
 ### Save creation failure fix (2026-10-17)
 

@@ -2,6 +2,7 @@
 #include <windows.h>
 #include <winhttp.h>
 #include "net_transport.h"
+#include "ranked_adapter.h"
 #include "steam_net.h"
 #include <atomic>
 #include <chrono>
@@ -134,12 +135,25 @@ int Client(const char* base, const char* token, const char* player, uint16_t por
     std::string response;
     if (!HttpPost(base, token, "/v1/queue", queue, response)) return 11;
     const auto deadline = std::chrono::steady_clock::now() + kTimeout;
-    while (Extract(response, "state") != "reserved" && std::chrono::steady_clock::now() < deadline)
+    while (Extract(response, "state") != "pending_acceptance" && std::chrono::steady_clock::now() < deadline)
     {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         if (!HttpPost(base, token, "/v1/status", "{}", response)) return 12;
     }
-    if (Extract(response, "state") != "reserved") return 13;
+    if (Extract(response, "state") != "pending_acceptance") return 13;
+    const std::string matchId = Extract(response, "match_id");
+    if (matchId.empty() || Extract(response, "opponent_endpoint").size() || Extract(response, "session_key_bytes").size()) return 19;
+    if (!HttpPost(base, token, ("/v1/matches/" + matchId + "/accept").c_str(), "{}", response)) return 20;
+    while (Extract(response, "state") != "confirmed" && std::chrono::steady_clock::now() < deadline)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        if (!HttpPost(base, token, "/v1/status", "{}", response)) return 21;
+    }
+    if (Extract(response, "state") != "confirmed") return 22;
+    // The final accept response confirms the match but intentionally contains no connection
+    // credentials. Fetch status after confirmation to obtain the participant-only reservation.
+    if (!HttpPost(base, token, "/v1/status", "{}", response)) return 23;
+    if (Extract(response, "state") != "confirmed") return 24;
     g_connectToken = Extract(response, "match_token");
     g_sessionKey = Extract(response, "session_key_bytes");
     const std::string a = Extract(response, "player_a"), b = Extract(response, "player_b");
@@ -171,6 +185,27 @@ int Client(const char* base, const char* token, const char* player, uint16_t por
     return 0;
 }
 
+int ConfirmedClient(uint16_t port)
+{
+    const char* player=std::getenv("TTT2_RANKED_PLAYER");
+    const char* peerPlayer=std::getenv("TTT2_RANKED_PEER_ID");
+    const char* matchToken=std::getenv("TTT2_RANKED_MATCH_TOKEN");
+    if(!player||!peerPlayer||!matchToken)return 30;
+    g_localPlayer=player;g_expectedPlayer=peerPlayer;g_connectToken=matchToken;
+    g_sessionKey=std::getenv("TTT2_RANKED_SESSION_KEY")?std::getenv("TTT2_RANKED_SESSION_KEY"):"";
+    if(!net::SetListenPort(port)||!net::Start(Receiver))return 31;
+    ranked::Reservation reservation{};char error[256]{};
+    if(!ranked::AcquireConfirmedReservation(reservation,error,sizeof(error))){std::fprintf(stderr,"confirmed adapter: %s\n",error);return 32;}
+    const uint64_t peer=reservation.peerId;
+    const std::string handshake="H|"+g_connectToken+"|"+g_localPlayer+"|"+g_sessionKey;
+    const auto deadline=std::chrono::steady_clock::now()+kTimeout;
+    while(!g_authenticated.load()&&std::chrono::steady_clock::now()<deadline){static_cast<void>(net::Send(peer,net::Channel::Reliable,handshake.data(),handshake.size()));std::this_thread::sleep_for(std::chrono::milliseconds(50));}
+    if(!g_authenticated.load())return 33;
+    for(unsigned i=0;i<20;++i){const std::string ping="P|confirmed|"+std::to_string(i);if(!net::Send(peer,net::Channel::Unreliable,ping.data(),ping.size()))return 34;std::this_thread::sleep_for(std::chrono::milliseconds(20));}
+    if(!WaitUntil([]{return g_replies.load()>=20;},deadline))return 35;
+    std::printf("%s: pre-confirmed runtime adapter registered peer; no queue request; ENet exchange passed\n",player);return 0;
+}
+
 bool StartChild(const char* executable, const char* base, const char* token, const char* player, int port,
                 PROCESS_INFORMATION& process)
 {
@@ -193,6 +228,7 @@ bool Send(uint64_t, bool, const void*, size_t) { return false; }
 
 int main(int argc, char** argv)
 {
+    if(argc==3&&std::strcmp(argv[1],"--confirmed-client")==0){char* end=nullptr;const unsigned long port=std::strtoul(argv[2],&end,10);if(!end||*end||!port||port>65535)return 2;return ConfirmedClient(uint16_t(port));}
     if (argc == 6 && std::strcmp(argv[1], "--client") == 0)
     {
         char* end = nullptr;

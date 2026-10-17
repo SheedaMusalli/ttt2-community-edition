@@ -59,6 +59,9 @@ uint64_t LocalPeer();                   // 0 before Start
 // Associates an application peer ID with a numeric IPv4 endpoint. Names are numeric IPv4 only;
 // DNS and public-address discovery belong to the matchmaking/configuration layer.
 bool RegisterPeer(uint64_t peer, const char* ipv4, uint16_t port);
+// Optional NAT-fallback route. The 16-byte relay token is provided by a confirmed reservation;
+// role must be 1 or 2. Relay framing is applied internally after the 500 ms direct-connect grace.
+bool RegisterRelayPeer(uint64_t peer, const char* ipv4, uint16_t port, const uint8_t token[16], uint8_t role);
 bool SetListenPort(uint16_t port);       // set before Start; 0 asks the OS for an ephemeral port
 bool Send(uint64_t peer, Channel channel, const void* data, size_t size);
 const char* BackendName();

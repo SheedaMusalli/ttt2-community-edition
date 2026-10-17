@@ -6,4 +6,6 @@ namespace performance_overlay
 void Start(void* gameWindow);
 // Called after each successfully presented game frame.
 void NotifyPresent();
+// Number of game frames successfully presented since the process started.
+uint64_t PresentedFrameCount();
 }

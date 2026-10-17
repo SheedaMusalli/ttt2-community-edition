@@ -146,8 +146,50 @@ void Error(char* error, uint32_t capacity, const char* message)
 
 bool Enabled() { return std::strcmp(Env("TTT2_RANKED_RUNTIME"), "1") == 0; }
 
+bool AcquireConfirmedReservation(Reservation& result, char* error, uint32_t errorCapacity)
+{
+    if (std::strcmp(Env("TTT2_RANKED_CONFIRMED"), "1") != 0)
+    { Error(error, errorCapacity, "No launcher-confirmed ranked reservation was supplied."); return false; }
+    if (!net::LocalPeer() || std::strcmp(net::BackendName(), "enet-ipv4") != 0)
+    { Error(error, errorCapacity, "Peer transport is not ready for the confirmed reservation."); return false; }
+    const std::string matchId = Env("TTT2_RANKED_MATCH_ID");
+    const std::string key = Env("TTT2_RANKED_SESSION_KEY");
+    const std::string roleText = Env("TTT2_RANKED_ROLE");
+    const std::string endpointText = Env("TTT2_RANKED_PEER_ENDPOINT");
+    if (matchId.size() != 32 || !DecodeHex16(key, result.sessionKey) ||
+        (roleText != "host" && roleText != "guest") ||
+        !ParseEndpoint(endpointText, result.opponentIp, result.opponentPort))
+    { Error(error, errorCapacity, "Launcher-confirmed session details are incomplete or malformed."); return false; }
+    result.sessionId = 0;
+    for (size_t i = 0; i < 16; ++i)
+    {
+        const char digit = matchId[i];
+        const unsigned nibble = digit >= '0' && digit <= '9' ? unsigned(digit - '0') :
+                                digit >= 'a' && digit <= 'f' ? unsigned(digit - 'a' + 10) :
+                                digit >= 'A' && digit <= 'F' ? unsigned(digit - 'A' + 10) : 16u;
+        if (nibble > 15) { Error(error, errorCapacity, "Launcher-confirmed match ID is invalid."); return false; }
+        result.sessionId = (result.sessionId << 4) | nibble;
+    }
+    result.role = roleText == "host" ? 1 : 2;
+    std::strncpy(result.opponentId, "confirmed-peer", sizeof(result.opponentId) - 1);
+    result.peerId = PeerId(endpointText);
+    if (!net::RegisterPeer(result.peerId, result.opponentIp, result.opponentPort))
+    { Error(error, errorCapacity, "Could not register the confirmed peer endpoint."); return false; }
+    const std::string relayText = Env("TTT2_RANKED_RELAY_ENDPOINT");
+    const std::string relayKey = Env("TTT2_RANKED_RELAY_TOKEN");
+    if (!relayText.empty() && !relayKey.empty() && ParseEndpoint(relayText, result.relayIp, result.relayPort) &&
+        DecodeHex16(relayKey, result.relayToken))
+    {
+        result.hasRelay = net::RegisterRelayPeer(result.peerId, result.relayIp, result.relayPort,
+                                                 result.relayToken, result.role);
+    }
+    return true;
+}
+
 bool AcquireReservation(Reservation& result, char* error, uint32_t errorCapacity)
 {
+    if (std::strcmp(Env("TTT2_RANKED_CONFIRMED"), "1") == 0)
+        return AcquireConfirmedReservation(result, error, errorCapacity);
     const char* base = Env("TTT2_RANKED_SERVICE");
     const char* token = Env("TTT2_RANKED_TOKEN");
     const char* player = Env("TTT2_RANKED_PLAYER");
@@ -169,8 +211,10 @@ bool AcquireReservation(Reservation& result, char* error, uint32_t errorCapacity
     char endpoint[40] = {};
     if (!listenPort || std::snprintf(endpoint, sizeof(endpoint), "%s:%u", listenIp, unsigned(listenPort)) < 0)
     { Error(error, errorCapacity, "Could not determine the local UDP endpoint."); return false; }
+    const char* rttMap = Env("TTT2_RELAY_RTT_MAP");
     const std::string body = std::string("{\"build\":\"") + EscapeJson(build) + "\",\"region\":\"" +
-                             EscapeJson(region) + "\",\"listen_endpoint\":\"" + endpoint + "\"}";
+                             EscapeJson(region) + "\",\"listen_endpoint\":\"" + endpoint + "\"" +
+                             (*rttMap ? std::string(",\"client_rtt_map\":") + rttMap : std::string()) + "}";
     std::string response;
     if (!Post(base, token, "/v1/queue", body, response))
     { Error(error, errorCapacity, "Ranked queue request failed."); return false; }
@@ -178,12 +222,12 @@ bool AcquireReservation(Reservation& result, char* error, uint32_t errorCapacity
     while (std::chrono::steady_clock::now() < deadline)
     {
         const std::string state = JsonString(response, "state");
-        if (state == "reserved") break;
+        if (state == "confirmed" || state == "reserved") break;
         if (!Post(base, token, "/v1/status", "{}", response))
         { Error(error, errorCapacity, "Ranked status request failed."); return false; }
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
     }
-    if (JsonString(response, "state") != "reserved")
+    if (JsonString(response, "state") != "confirmed" && JsonString(response, "state") != "reserved")
     { Error(error, errorCapacity, "No opponent reservation was found before the queue timed out."); return false; }
     const std::string matchId = JsonString(response, "id");
     const std::string opponent = JsonString(response, "player_a") == player ? JsonString(response, "player_b") : JsonString(response, "player_a");
@@ -205,8 +249,17 @@ bool AcquireReservation(Reservation& result, char* error, uint32_t errorCapacity
     std::memcpy(result.opponentId, opponent.data(), opponentLength);
     result.opponentId[opponentLength] = '\0';
     result.peerId = PeerId(endpointText);
+    result.role = JsonString(response, "role") == "host" ? 1 : 2;
     if (!net::RegisterPeer(result.peerId, result.opponentIp, result.opponentPort))
     { Error(error, errorCapacity, "Could not register the opponent IPv4 endpoint."); return false; }
+    const std::string relayText = JsonString(response, "relay_endpoint");
+    const std::string relayTokenText = JsonString(response, "relay_token");
+    if (!relayText.empty() && !relayTokenText.empty())
+    {
+        char relayIp[16] = {}; uint16_t relayPort = 0; uint8_t relayToken[16]{};
+        if (ParseEndpoint(relayText, relayIp, relayPort) && DecodeHex16(relayTokenText, relayToken))
+        { result.hasRelay = net::RegisterRelayPeer(result.peerId, relayIp, relayPort, relayToken, result.role); std::memcpy(result.relayIp, relayIp, sizeof(relayIp)); result.relayPort = relayPort; std::memcpy(result.relayToken, relayToken, sizeof(relayToken)); }
+    }
     const std::string readyBody = std::string("{\"match_id\":\"") + matchId + "\"}";
     if (!Post(base, token, "/v1/ready", readyBody, response))
     { Error(error, errorCapacity, "Could not mark the ranked reservation ready."); return false; }

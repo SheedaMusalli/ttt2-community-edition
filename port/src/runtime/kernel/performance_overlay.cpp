@@ -10,6 +10,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <string>
 #include <thread>
 #include <vector>
@@ -238,6 +239,10 @@ void Run(HWND gameWindow)
 {
     const unsigned metrics = SelectedMetrics();
     if (!metrics || !IsWindow(gameWindow)) return;
+    const char* enabledValue=std::getenv("TTT2_OVERLAY_ENABLED");
+    if(enabledValue&&std::strcmp(enabledValue,"0")==0)return;
+    int toggleKey=VK_F10;
+    if(const char* key=std::getenv("TTT2_OVERLAY_TOGGLE_KEY")){const int parsed=std::atoi(key);if(parsed>0&&parsed<=255)toggleKey=parsed;}
     WNDCLASSW wc{};
     wc.lpfnWndProc = OverlayProc;
     wc.hInstance = GetModuleHandleW(nullptr);
@@ -261,21 +266,27 @@ void Run(HWND gameWindow)
     uint64_t previousCpu=0,previousPresents=g_presents.load();
     FILETIME created{},exited{},kernel{},user{};GetProcessTimes(GetCurrentProcess(),&created,&exited,&kernel,&user);previousCpu=FileTimeValue(kernel)+FileTimeValue(user);
     auto cpuTime=std::chrono::steady_clock::now(),frameTime=cpuTime;
+    auto nextSample=cpuTime;
+    bool userVisible=true,previousToggleDown=false;
     while(IsWindow(gameWindow)&&IsWindow(overlay))
     {
         MSG message{};
         while(PeekMessageW(&message,overlay,0,0,PM_REMOVE)){TranslateMessage(&message);DispatchMessageW(&message);}
-        const bool visible=IsWindowVisible(gameWindow)&&!IsIconic(gameWindow)&&GetForegroundWindow()==gameWindow;
+        const bool toggleDown=(GetAsyncKeyState(toggleKey)&0x8000)!=0;
+        if(toggleDown&&!previousToggleDown)userVisible=!userVisible;
+        previousToggleDown=toggleDown;
+        const bool visible=userVisible&&IsWindowVisible(gameWindow)&&!IsIconic(gameWindow)&&GetForegroundWindow()==gameWindow;
         if(visible)
         {
             RECT r{};GetClientRect(gameWindow,&r);POINT p{12,46};ClientToScreen(gameWindow,&p);
             SetWindowPos(overlay,HWND_TOPMOST,p.x,p.y,kWidth,height,SWP_NOACTIVATE|SWP_SHOWWINDOW);
-            Sample(snapshot,metrics,query,counter,previousCpu,cpuTime,previousPresents,frameTime);
-            *reinterpret_cast<Snapshot*>(GetWindowLongPtrW(overlay,GWLP_USERDATA))=snapshot;
-            InvalidateRect(overlay,nullptr,FALSE);UpdateWindow(overlay);
+            const auto now=std::chrono::steady_clock::now();
+            if(now>=nextSample){Sample(snapshot,metrics,query,counter,previousCpu,cpuTime,previousPresents,frameTime);
+                *reinterpret_cast<Snapshot*>(GetWindowLongPtrW(overlay,GWLP_USERDATA))=snapshot;
+                InvalidateRect(overlay,nullptr,FALSE);UpdateWindow(overlay);nextSample=now+std::chrono::milliseconds(500);}
         }
         else ShowWindow(overlay,SW_HIDE);
-        Sleep(500);
+        Sleep(16);
     }
     if(query)PdhCloseQuery(query);
     delete reinterpret_cast<Snapshot*>(GetWindowLongPtrW(overlay,GWLP_USERDATA));
@@ -285,7 +296,8 @@ void Run(HWND gameWindow)
 
 void Start(void* gameWindow)
 {
-    if (!SelectedMetrics() || g_started.exchange(true)) return;
+    const char* enabledValue=std::getenv("TTT2_OVERLAY_ENABLED");
+    if ((enabledValue&&std::strcmp(enabledValue,"0")==0)||!SelectedMetrics()||g_started.exchange(true)) return;
     std::thread(Run,static_cast<HWND>(gameWindow)).detach();
 }
 
@@ -301,5 +313,10 @@ void NotifyPresent()
     }
     previous = now;
     g_presents.fetch_add(1,std::memory_order_relaxed);
+}
+
+uint64_t PresentedFrameCount()
+{
+    return g_presents.load(std::memory_order_relaxed);
 }
 }

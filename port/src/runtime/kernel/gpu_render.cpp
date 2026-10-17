@@ -141,8 +141,27 @@ public:
 private:
     RasterPool()
     {
-        unsigned n = std::thread::hardware_concurrency();
-        m_count = n > 3 ? n - 2 : 1;             // leave lanes for the game's own threads
+        const unsigned logicalCpus = (std::max)(1u, std::thread::hardware_concurrency());
+        // The raster caller is already one active lane. The previous n-2 helper default left
+        // only one logical CPU free on a 12-thread host, competing with the guest, command
+        // processor, input polling and driver threads. Hardware rendering normally needs this
+        // pool only for uncommon CPU vertex fallbacks and upload conversion, so keep a few
+        // helpers instead of filling the machine. TTT2_RASTER_WORKERS can override the default
+        // for profiling; it is clamped so the caller always retains one logical CPU.
+        const unsigned maxHelpers = logicalCpus > 1 ? logicalCpus - 1 : 0;
+        const unsigned defaultHelpers = logicalCpus > 4
+            ? (std::min)(4u, logicalCpus - 3)
+            : (logicalCpus > 2 ? 1u : 0u);
+        m_count = defaultHelpers;
+        if (const char* configured = std::getenv("TTT2_RASTER_WORKERS"))
+        {
+            char* end = nullptr;
+            const unsigned long requested = std::strtoul(configured, &end, 10);
+            if (end != configured && *end == '\0')
+                m_count = requested > maxHelpers ? maxHelpers : static_cast<unsigned>(requested);
+        }
+        std::fprintf(stderr, "[raster] worker pool: %u helpers + caller (%u logical CPUs)\n",
+                     m_count, logicalCpus);
         for (unsigned i = 0; i < m_count; ++i)
             std::thread([this] { Worker(); }).detach();
     }
@@ -1769,7 +1788,9 @@ bool GpuExecuteDraw(const uint32_t* regs, uint32_t initiator, uint32_t indexAddr
     // the vertex shader out over the raster pool: per-vertex work is independent and its
     // inputs read-only (measured 2026-10-10: the battle submits ~145K triangles a frame and the
     // single-threaded interpreter on the CP thread was the frame's critical path).
-    thread_local std::vector<int32_t> slotOfIndex;
+    thread_local std::vector<uint32_t> slotOfIndex;
+    thread_local std::vector<uint32_t> slotGeneration;
+    thread_local uint32_t currentSlotGeneration = 0;
     thread_local std::vector<uint32_t> uniqueIdx;
     thread_local std::vector<Vertex> shaded;
     thread_local std::vector<uint8_t> shadedInterp;
@@ -1777,13 +1798,30 @@ bool GpuExecuteDraw(const uint32_t* regs, uint32_t initiator, uint32_t indexAddr
     auto ensureShaded = [&] {
         if (shadedReady) return;
         shadedReady = true;
-        slotOfIndex.assign(size_t(maxIdx) + 1, -1);
+        // Draws often address a sparse subset of a large vertex range. Clearing a slot array
+        // up to maxIdx on every draw made the command processor do O(maxIdx) writes even when
+        // only a handful of indices were referenced. Generation stamps make initialization
+        // proportional to indices actually used; the arrays are only zeroed on growth or the
+        // practically unreachable generation wrap.
+        const size_t slotCount = size_t(maxIdx) + 1;
+        if (slotOfIndex.size() < slotCount) slotOfIndex.resize(slotCount);
+        if (slotGeneration.size() < slotCount) slotGeneration.resize(slotCount, 0);
+        if (++currentSlotGeneration == 0)
+        {
+            std::fill(slotGeneration.begin(), slotGeneration.end(), 0);
+            currentSlotGeneration = 1;
+        }
         uniqueIdx.clear();
         for (uint32_t i = 0; i < numIdx; ++i)
         {
             if (cut[i]) continue;
             const uint32_t v = idx[i];
-            if (slotOfIndex[v] < 0) { slotOfIndex[v] = (int32_t)uniqueIdx.size(); uniqueIdx.push_back(v); }
+            if (slotGeneration[v] != currentSlotGeneration)
+            {
+                slotGeneration[v] = currentSlotGeneration;
+                slotOfIndex[v] = uint32_t(uniqueIdx.size());
+                uniqueIdx.push_back(v);
+            }
         }
         const size_t n = uniqueIdx.size();
         if (shaded.size() < n) shaded.resize(n);
@@ -1809,7 +1847,11 @@ bool GpuExecuteDraw(const uint32_t* regs, uint32_t initiator, uint32_t indexAddr
     };
     auto fetchVertex = [&](uint32_t index) -> const Vertex& {
         ensureShaded();
-        return shaded[size_t(slotOfIndex[index])];
+        return shaded[slotOfIndex[index]];
+    };
+    auto vertexSlot = [&](uint32_t index) -> int32_t {
+        return index < slotGeneration.size() && slotGeneration[index] == currentSlotGeneration
+            ? int32_t(slotOfIndex[index]) : -1;
     };
 
 #if defined(TTT2_GPU_HW_BACKEND)
@@ -2573,15 +2615,17 @@ bool GpuExecuteDraw(const uint32_t* regs, uint32_t initiator, uint32_t indexAddr
                            firstShaded[2], firstShaded[3]);
         for (uint32_t i = 0; shadedReady && i < numIdx && i < 4; ++i)
         {
-            if (cut[i] || slotOfIndex[idx[i]] < 0) continue;
-            const Vertex& v = shaded[size_t(slotOfIndex[idx[i]])];
+            if (cut[i]) continue;
+            const int32_t slot = vertexSlot(idx[i]);
+            if (slot < 0) continue;
+            const Vertex& v = shaded[size_t(slot)];
             n += std::snprintf(line + n, sizeof(line) - n, " (%.1f,%.1f,%.3f/%.4f)%s",
                                v.x, v.y, v.z, v.invW, v.valid ? "" : "!");
         }
         // First interpolator of vertex 0, which is where a colour or texcoord shows up.
-        if (shadedReady && interpCount && !cut[0] && slotOfIndex[idx[0]] >= 0)
+        if (shadedReady && interpCount && !cut[0] && vertexSlot(idx[0]) >= 0)
         {
-            const Vertex& v0 = shaded[size_t(slotOfIndex[idx[0]])];
+            const Vertex& v0 = shaded[size_t(vertexSlot(idx[0]))];
             n += std::snprintf(line + n, sizeof(line) - n, " i0=(%.3f,%.3f,%.3f,%.3f)",
                                v0.attr[0][0], v0.attr[0][1], v0.attr[0][2], v0.attr[0][3]);
         }

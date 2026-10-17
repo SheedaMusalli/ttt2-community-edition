@@ -499,8 +499,7 @@ struct PadSnapshot
     XINPUT_CAPABILITIES caps{};
     bool physical = false; // protected by m; separate from logical connected state
 };
-// Polling cadence is user-selectable in the launcher and shared through launcher.ini.
-// Absolute deadlines prevent per-iteration work time from accumulating into input latency.
+// The launcher stores the requested cadence; Windows/XInput are sampled at at most 1 kHz.
 unsigned NormalizePadPollRateHz(unsigned hz)
 {
     switch (hz)
@@ -516,32 +515,12 @@ std::chrono::nanoseconds PadPollIntervalForHz(unsigned hz)
     return std::chrono::nanoseconds(1'000'000'000LL / NormalizePadPollRateHz(hz));
 }
 
-void WaitForPadPollDeadline(std::chrono::steady_clock::time_point deadline, HANDLE highResolutionTimer)
+unsigned EffectivePadPollRateHz(unsigned requestedHz)
 {
-    // Sleep-until often wakes only at the system timer's ~1 ms granularity. For rates above
-    // 1 kHz, use a high-resolution waitable timer when Windows supports it, then spin briefly
-    // to the absolute deadline. If timer creation fails, yield less and spin to preserve the
-    // requested cadence; the higher settings can consequently consume a full CPU core.
-    constexpr auto kSpinTail = std::chrono::microseconds(40);
-    for (;;)
-    {
-        const auto remaining = deadline - std::chrono::steady_clock::now();
-        if (remaining <= std::chrono::steady_clock::duration::zero())
-            return;
-        if (highResolutionTimer && remaining > kSpinTail)
-        {
-            const auto waitDuration = remaining - kSpinTail;
-            const auto due100ns = std::chrono::duration_cast<std::chrono::nanoseconds>(waitDuration).count() / 100;
-            LARGE_INTEGER due{};
-            due.QuadPart = -due100ns;
-            if (SetWaitableTimerEx(highResolutionTimer, &due, 0, nullptr, nullptr, nullptr, 0))
-            {
-                WaitForSingleObject(highResolutionTimer, INFINITE);
-                continue;
-            }
-        }
-        YieldProcessor();
-    }
+    // XInput and the Windows scheduler do not expose new device state at 2–8 kHz.
+    // Keep those launcher choices but cap host polling at 1 kHz to prevent repeated
+    // identical reads from consuming CPU and harming frame pacing.
+    return (std::min)(NormalizePadPollRateHz(requestedHz), 1000u);
 }
 
 unsigned ReadPadPollRateHz()
@@ -902,18 +881,12 @@ void PadPollThread()
 {
     PadPollState polling;
     const bool autoStart = AutoStartEnabled(std::getenv("TTT2_AUTOSTART"));
-    const unsigned pollRateHz = ReadPadPollRateHz();
+    const unsigned requestedPollRateHz = ReadPadPollRateHz();
+    const unsigned pollRateHz = EffectivePadPollRateHz(requestedPollRateHz);
     const auto pollInterval = PadPollIntervalForHz(pollRateHz);
-    constexpr DWORD kCreateWaitableTimerHighResolution = 0x00000002;
-    HANDLE highResolutionTimer = pollRateHz > 1000
-        ? CreateWaitableTimerExW(nullptr, nullptr, kCreateWaitableTimerHighResolution,
-                                 TIMER_MODIFY_STATE | SYNCHRONIZE)
-        : nullptr;
-    std::fprintf(stderr, "[input] automatic Start %s; host polling at %u Hz (%lld ns interval)\n",
-                 autoStart ? "enabled" : "disabled", pollRateHz,
+    std::fprintf(stderr, "[input] automatic Start %s; requested %u Hz, host polling at %u Hz (%lld ns interval)\n",
+                 autoStart ? "enabled" : "disabled", requestedPollRateHz, pollRateHz,
                  static_cast<long long>(pollInterval.count()));
-    if (pollRateHz > 1000 && !highResolutionTimer)
-        std::fprintf(stderr, "[input] high-resolution timer unavailable; using a deadline spin for rates above 1000 Hz\n");
     PadScript script;
     LoadScript(script, std::getenv("TTT2_INPUT_SCRIPT"));
     const bool player2KeyboardEnabled = Player2KeyboardEnabled();
@@ -926,10 +899,7 @@ void PadPollThread()
             std::chrono::steady_clock::now() - started).count();
         PollPadsOnce(polling, autoStart, uint64_t(elapsed), &script, player2KeyboardEnabled);
         nextPoll += pollInterval;
-        if (pollRateHz > 1000)
-            WaitForPadPollDeadline(nextPoll, highResolutionTimer);
-        else
-            std::this_thread::sleep_until(nextPoll);
+        std::this_thread::sleep_until(nextPoll);
         const auto now = std::chrono::steady_clock::now();
         if (now > nextPoll + pollInterval)
             nextPoll = now; // Never run catch-up bursts after a slow host poll.

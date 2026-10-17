@@ -32,6 +32,10 @@ enable_language(C)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 option(TTT2_LOCAL_SAVES "Enable persistent local save containers" ON)
+option(BUILD_RELAY_DAEMON "Build standalone UDP relay daemon" ON)
+if(BUILD_RELAY_DAEMON)
+    add_subdirectory(tools/relay_daemon)
+endif()
 
 # Standalone verification of the rollback coordinator. This uses a synthetic deterministic
 # state fixture and does not link or alter guest session/runtime hooks.
@@ -73,7 +77,8 @@ if(WIN32)
     target_link_libraries(ttt2_test_xnet_route PRIVATE ws2_32 ttt2_enet)
     add_executable(ttt2_test_ranked_e2e
         tools/test_ranked_e2e.cpp
-        src/runtime/kernel/net_transport.cpp)
+        src/runtime/kernel/net_transport.cpp
+        src/runtime/kernel/ranked_adapter.cpp)
     target_include_directories(ttt2_test_ranked_e2e PRIVATE src/runtime/kernel)
     target_compile_definitions(ttt2_test_ranked_e2e PRIVATE _CRT_SECURE_NO_WARNINGS)
     target_link_libraries(ttt2_test_ranked_e2e PRIVATE ws2_32 winhttp ttt2_enet)
@@ -89,6 +94,15 @@ if(BUILD_TESTING)
         find_package(Python3 COMPONENTS Interpreter REQUIRED)
         add_test(NAME ranked_e2e COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tools/run_ranked_e2e.py" "$<TARGET_FILE:ttt2_test_ranked_e2e>")
         set_tests_properties(ranked_e2e PROPERTIES TIMEOUT 60 ENVIRONMENT "TTT2_NET=ipv4")
+        if(BUILD_RELAY_DAEMON)
+            add_test(NAME relay_daemon COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tools/test_relay_daemon.py" "$<TARGET_FILE:ttt2_relay_daemon>")
+            set_tests_properties(relay_daemon PROPERTIES TIMEOUT 20)
+        endif()
+    endif()
+    if(UNIX AND BUILD_RELAY_DAEMON)
+        find_package(Python3 COMPONENTS Interpreter REQUIRED)
+        add_test(NAME relay_daemon COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tools/test_relay_daemon.py" "$<TARGET_FILE:ttt2_relay_daemon>")
+        set_tests_properties(relay_daemon PROPERTIES TIMEOUT 20)
     endif()
 endif()
 if(MSVC)
@@ -223,7 +237,7 @@ target_link_options(tekken_recomp PRIVATE "/MAP:tekken_recomp.map")
 
 # --- Version, icon -------------------------------------------------------------------------
 # One version for the game executable's VERSIONINFO, the installer and Add or remove programs.
-set(TTT2_VERSION "2.1.0")
+set(TTT2_VERSION "2.2.0")
 string(REPLACE "." "," TTT2_VERSION_COMMAS "${TTT2_VERSION},0")
 # Original TTT2 Community Edition mark, shared by the installer and installed game executable.
 set(TTT2_SETUP_ICON "${CMAKE_SOURCE_DIR}/src/setup/ttt2.ico")

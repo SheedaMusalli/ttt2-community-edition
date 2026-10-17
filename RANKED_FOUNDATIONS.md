@@ -356,6 +356,12 @@ The setup embeds the matching launcher and locally generated game runtime. These
 game-derived executables remain local artifacts and are not added to Git. The
 installer can process a legally obtained disc image and TU3 locally.
 
+The verified clean Release build uses the Windows SDK `rc.exe` for VERSIONINFO
+resources instead of Clang-CL's RC emulation. The installer and generated runtime
+both report FileVersion/ProductVersion `2.1.0`. The default CMake selection prefers
+the installed Windows SDK resource compiler when a caller has not explicitly chosen
+one.
+
 The v2.1 source documentation records the launcher repaint/layout changes, token
 automation and networking boundary. Guest ABI and in-game session behavior remain
 unverified; standalone service and transport tests do not establish playable online

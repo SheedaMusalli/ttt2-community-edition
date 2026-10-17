@@ -1,4 +1,19 @@
 cmake_minimum_required(VERSION 3.20)
+
+# Clang-CL's resource-compiler mode does not preserve the version strings from the
+# launcher's generated VERSIONINFO resource on this project. Prefer the Windows SDK
+# resource compiler before project() initializes the RC language.
+if(CMAKE_HOST_WIN32 AND NOT DEFINED CMAKE_RC_COMPILER)
+    file(GLOB TTT2_RC_CANDIDATES
+        "$ENV{ProgramFiles}/Windows Kits/10/bin/*/x64/rc.exe"
+        "$ENV{ProgramFiles}/../Program Files (x86)/Windows Kits/10/bin/*/x64/rc.exe")
+    list(SORT TTT2_RC_CANDIDATES COMPARE NATURAL ORDER DESCENDING)
+    if(TTT2_RC_CANDIDATES)
+        list(GET TTT2_RC_CANDIDATES 0 TTT2_RC_COMPILER)
+        set(CMAKE_RC_COMPILER "${TTT2_RC_COMPILER}" CACHE FILEPATH "Windows SDK resource compiler")
+    endif()
+endif()
+
 project(tekken_recomp CXX)
 enable_language(C)
 

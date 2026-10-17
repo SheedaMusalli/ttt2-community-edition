@@ -1,5 +1,6 @@
 // Unpack the embedded runtime. See payload.h.
 #include "setup/payload.h"
+#include "setup/payload_compression.h"
 #include "setup/payload_ids.h"
 
 #include <windows.h>
@@ -74,7 +75,13 @@ uint64_t PayloadBytes()
     uint64_t t = 0;
     for (const Item& it : kItems) {
         const void* d = nullptr; DWORD n = 0;
-        if (FindRes(it.id, d, n)) t += n;
+        if (!FindRes(it.id, d, n)) continue;
+        if (it.id == IDR_GAME_EXE) {
+            uint64_t originalSize = 0;
+            if (GamePayloadOriginalSize(d, n, originalSize)) t += originalSize;
+        } else {
+            t += n;
+        }
     }
     return t;
 }
@@ -89,7 +96,13 @@ bool WritePayload(const wchar_t* destDir, std::string& err, std::vector<std::wst
         }
         const std::wstring path = std::wstring(destDir) + L"\\" + it.name;
         if (written) written->push_back(path);
-        if (!WriteFileBytes(path, d, n, err)) return false;
+        if (it.id == IDR_GAME_EXE) {
+            std::vector<uint8_t> unpacked;
+            if (!DecompressGamePayload(d, n, unpacked, err)) return false;
+            if (!WriteFileBytes(path, unpacked.data(), unpacked.size(), err)) return false;
+        } else if (!WriteFileBytes(path, d, n, err)) {
+            return false;
+        }
     }
     return true;
 }

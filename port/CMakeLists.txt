@@ -241,6 +241,7 @@ target_sources(tekken_recomp PRIVATE "${CMAKE_BINARY_DIR}/game.rc")
 # The dev exe stays a console program so run_port.cmd / the test scripts keep their stderr.
 set(TTT2_PAYLOAD_DIR "${CMAKE_BINARY_DIR}/payload")
 set(TTT2_GAME_EXE "${TTT2_PAYLOAD_DIR}/Tekken Tag Tournament 2.exe")
+set(TTT2_GAME_RESOURCE "${TTT2_GAME_EXE}.lzms")
 set(TTT2_LAUNCHER_EXE "${TTT2_PAYLOAD_DIR}/TTT2 Launcher.exe")
 configure_file(src/launcher/launcher.rc.in "${CMAKE_BINARY_DIR}/launcher.rc" @ONLY)
 set_source_files_properties("${CMAKE_BINARY_DIR}/launcher.rc" PROPERTIES OBJECT_DEPENDS "${TTT2_SETUP_ICON}")
@@ -331,6 +332,42 @@ if(TTT2_CRT_DIRS AND TTT2_EDITBIN AND EXISTS "${XENON_UTILS}/xex_patcher.cpp")
         VERBATIM)
     add_custom_target(ttt2_game_exe DEPENDS "${TTT2_GAME_EXE}")
 
+    # Keep the downloaded setup small without changing the installed executable. LZMS uses one
+    # large block for the best ratio on this 200+ MiB payload; the API is inbox on Windows 8+.
+    add_library(ttt2_payload_compression STATIC src/setup/payload_compression.cpp)
+    target_include_directories(ttt2_payload_compression PUBLIC src)
+    target_link_libraries(ttt2_payload_compression PUBLIC cabinet)
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+        target_compile_options(ttt2_payload_compression PRIVATE -O2 -Wno-everything)
+    else()
+        target_compile_options(ttt2_payload_compression PRIVATE /O2 /W0)
+    endif()
+    set_property(TARGET ttt2_payload_compression PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded")
+
+    add_executable(ttt2_compress_game_payload tools/compress_game_payload.cpp)
+    target_link_libraries(ttt2_compress_game_payload PRIVATE ttt2_payload_compression)
+    target_compile_definitions(ttt2_compress_game_payload PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_compile_options(ttt2_compress_game_payload PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:/O2>")
+    set_property(TARGET ttt2_compress_game_payload PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded")
+
+    add_custom_command(OUTPUT "${TTT2_GAME_RESOURCE}"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${TTT2_PAYLOAD_DIR}"
+        COMMAND $<TARGET_FILE:ttt2_compress_game_payload> "${TTT2_GAME_EXE}" "${TTT2_GAME_RESOURCE}"
+        DEPENDS "${TTT2_GAME_EXE}" ttt2_compress_game_payload
+        COMMENT "Compressing and verifying the installer game payload (LZMS)"
+        VERBATIM)
+    add_custom_target(ttt2_packed_game DEPENDS "${TTT2_GAME_RESOURCE}")
+
+    if(BUILD_TESTING)
+        add_executable(ttt2_test_payload_compression tools/test_payload_compression.cpp)
+        target_link_libraries(ttt2_test_payload_compression PRIVATE ttt2_payload_compression)
+        target_compile_definitions(ttt2_test_payload_compression PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+        target_compile_options(ttt2_test_payload_compression PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:/O2>")
+        set_property(TARGET ttt2_test_payload_compression PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded")
+        add_test(NAME payload_compression_roundtrip
+            COMMAND ttt2_test_payload_compression "${TTT2_GAME_EXE}" "${TTT2_GAME_RESOURCE}")
+    endif()
+
     # Disc / title-update readers + XenonUtils' XEX delta patcher (MIT) and its dependencies.
     add_library(ttt2_setup_core STATIC
         src/setup/xdvdfs.cpp
@@ -367,15 +404,16 @@ if(TTT2_CRT_DIRS AND TTT2_EDITBIN AND EXISTS "${XENON_UTILS}/xex_patcher.cpp")
         # The .rc pulls these in by PATH: without OBJECT_DEPENDS a rebuilt game exe would not
         # relink the installer, which would silently ship the previous build (T&J lesson).
         set_source_files_properties("${CMAKE_BINARY_DIR}/${variant}.rc" PROPERTIES OBJECT_DEPENDS
-            "${TTT2_GAME_EXE};${TTT2_LAUNCHER_EXE};${TTT2_SETUP_ICON};${TTT2_README_TXT};${TTT2_STEAM_RESOURCE_DEPENDENCY};${TTT2_SETUP_MANIFEST}")
+            "${TTT2_GAME_EXE};${TTT2_GAME_RESOURCE};${TTT2_LAUNCHER_EXE};${TTT2_SETUP_ICON};${TTT2_README_TXT};${TTT2_STEAM_RESOURCE_DEPENDENCY};${TTT2_SETUP_MANIFEST}")
         add_executable(${variant} WIN32
             src/setup/setup_main.cpp
             src/setup/payload.cpp
             "${CMAKE_BINARY_DIR}/${variant}.rc")
         add_dependencies(${variant} ttt2_game_exe)
+        add_dependencies(${variant} ttt2_packed_game)
         add_dependencies(${variant} ttt2_launcher)
         add_dependencies(${variant} ttt2_crt_payload)
-        target_link_libraries(${variant} PRIVATE ttt2_setup_core comctl32 shell32 ole32 shlwapi advapi32 uuid bcrypt uxtheme dwmapi)
+        target_link_libraries(${variant} PRIVATE ttt2_setup_core ttt2_payload_compression comctl32 shell32 ole32 shlwapi advapi32 uuid bcrypt uxtheme dwmapi)
         target_compile_definitions(${variant} PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
                                    TTT2_VERSION_STR="${TTT2_VERSION}"
                                    TTT2_INSTALLER_HAS_STEAM=$<BOOL:${TTT2_HAVE_STEAMWORKS}>)

@@ -24,6 +24,8 @@ The game loop currently runs at approximately 60 simulation updates per second. 
 
 Use 64-bit Windows 10 or 11, a Direct3D 11-capable graphics device, and about 13 GB of free space. The installer needs an Xbox 360 disc image that you are legally entitled to use, plus Title Update 3 (TU3), available as a separate asset on the [Releases page](https://github.com/SheedaMusalli/ttt2-community-edition/releases/latest). This repository does not provide a game ISO download. The installer processes the supplied files locally; it does not download or include the game image.
 
+The setup compresses its included runtime with Windows LZMS to reduce the download; installation expands the executable locally, so its installed size is unchanged.
+
 ### Installation steps
 
 1. Download the latest `ttt2_setup.exe` installer from [Releases](https://github.com/SheedaMusalli/ttt2-community-edition/releases/latest).

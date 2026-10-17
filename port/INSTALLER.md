@@ -8,7 +8,10 @@ flow, worker thread, uninstaller guard, `/silent` test mode, payload-as-RCDATA.
 **It ships no game data.** The player supplies the Xbox 360 disc image and Title Update 3; every
 game file is produced on their PC at install time. The installer carries only our files: the
 port exe, steam_api64.dll (Steamworks SDK redistributable), the four VC++ runtime DLLs the exe
-imports, the readme, and an original icon.
+imports, the readme, and an original icon. The distributed setup stores the game exe as a
+high-ratio LZMS resource and unpacks it during installation; the installed exe is byte-for-byte
+identical to the build output. LZMS uses the Windows Compression API (`cabinet.dll`), available
+in Windows 10/11 without an extra runtime download.
 
 ## What it asks for
 
@@ -49,6 +52,8 @@ window. The dev exe stays a console program. Both carry the icon + VERSIONINFO (
 
 `ttt2_setup.exe` = requireAdministrator (the one to ship). `ttt2_setup_probe.exe` = the same
 program as asInvoker, for scripted `/silent` installs into a test folder (no HKLM key then).
+The build compresses the game payload with LZMS and verifies a full decompression round-trip
+before embedding it in the setup executable.
 Manifests are generated (`setup.manifest.in`) and embedded through the .rc (`/MANIFEST:NO`), with
 the Common Controls v6 dependency. /MT: the installer itself needs no redist.
 Version: `TTT2_VERSION` in CMakeLists (VERSIONINFO, Add or remove programs).

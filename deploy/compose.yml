@@ -5,6 +5,8 @@ services:
       dockerfile: deploy/Dockerfile
     command: ["serve"]
     restart: unless-stopped
+    environment:
+      TTT2_RANKED_ALLOW_REGISTRATION: ${TTT2_RANKED_ALLOW_REGISTRATION:-0}
     volumes:
       - ranked-data:/data
     expose:

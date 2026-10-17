@@ -9,6 +9,7 @@
 #include "profiles.h"
 #include "xlive.h"
 #include "matchmaking.h"
+#include "ranked_adapter.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -253,6 +254,41 @@ uint32_t Search(uint8_t* base, uint32_t b)
     const uint32_t size = GRead32(base, b + 0x18), results = GRead32(base, b + 0x1C);
     if (!results) return E_INVALIDARG_;
     if (size < 8 + 0x5C * numResults) return X_ONLINE_E_SESSION_INSUFFICIENT_BUFFER;
+    if (ranked::Enabled())
+    {
+        if (!numResults) return WriteResults(base, {}, results, size);
+        ranked::Reservation reservation;
+        char error[192] = {};
+        if (!ranked::AcquireReservation(reservation, error, sizeof(error)))
+        {
+            Log("ranked_reservation_failed", "ranked reservation failed: %s", error);
+            return ERROR_FUNCTION_FAILED_;
+        }
+        mm::SessionRecord result;
+        result.id = reservation.sessionId;
+        result.hostPeer = reservation.peerId;
+        result.hostXuid = xlive::OnlineXuid();
+        result.flags = kMatchmaking | kPeerNetwork;
+        result.maxPublic = 2;
+        result.filledPublic = 1;
+        // Session info is the already established 0x3C host record: XNKID + XNADDR + XNKEY.
+        // The service match ID supplies XNKID; XNADDR+0x18 is the transport peer ID; the shared
+        // 16-byte service key occupies XNKEY. The endpoint is registered before exposing it.
+        for (int i = 0; i < 8; ++i) result.info[i] = uint8_t(reservation.sessionId >> (56 - 8 * i));
+        const uint32_t virtualAddr = 0x0A4E0000u | uint32_t(reservation.peerId & 0xFFFFu);
+        for (int i = 0; i < 4; ++i)
+        {
+            result.info[8 + i] = uint8_t(virtualAddr >> (24 - i * 8));
+            result.info[12 + i] = uint8_t(virtualAddr >> (24 - i * 8));
+        }
+        for (int i = 0; i < 8; ++i) result.info[8 + 0x18 + i] = uint8_t(reservation.peerId >> (56 - 8 * i));
+        result.info[8 + 0x20] = 1;
+        std::memcpy(result.info + 0x2C, reservation.sessionKey, sizeof(reservation.sessionKey));
+        Log("ranked_reservation", "ranked reservation %016llX for peer %s at %s:%u",
+            (unsigned long long)reservation.sessionId, reservation.opponentId, reservation.opponentIp,
+            unsigned(reservation.opponentPort));
+        return WriteResults(base, { result }, results, size);
+    }
     std::map<uint32_t, uint32_t> wanted;
     for (uint32_t i = 0; contexts && i < numContexts && i < 32; ++i)
     {

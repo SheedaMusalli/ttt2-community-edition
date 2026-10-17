@@ -1,10 +1,5 @@
-// Packet transport between game instances (port/ONLINE_PLAN.md): the virtual sockets
-// (xsocket.cpp) and the session layer send whole packets to a peer id; the backend delivers them.
-//  - steam (explicit opt-in with an authorized AppID; steam_net.cpp): SteamNetworkingMessages over
-//    Valve's relays, peer id = SteamID.
-//  - loopback: UDP on 127.0.0.1, one port per instance (28100 + n). Peer id =
-//    0x4C4F4F50'0000xxxx with the port in the low bits. For two instances on one PC (both would
-//    have the same SteamID). Default: loopback. TTT2_NET=steam requires TTT2_STEAM_APP_ID.
+// Packet transport for virtual XNet sockets. ENet supplies IPv4 peers and delivery semantics;
+// the optional Steam implementation remains an explicit separate backend.
 #pragma once
 #include <cstddef>
 #include <cstdint>
@@ -61,6 +56,10 @@ using Receiver = void (*)(uint64_t fromPeer, Channel channel, const uint8_t* dat
 // Starts the backend once (idempotent); packets arrive on its own thread through `receiver`.
 bool Start(Receiver receiver);
 uint64_t LocalPeer();                   // 0 before Start
+// Associates an application peer ID with a numeric IPv4 endpoint. Names are numeric IPv4 only;
+// DNS and public-address discovery belong to the matchmaking/configuration layer.
+bool RegisterPeer(uint64_t peer, const char* ipv4, uint16_t port);
+bool SetListenPort(uint16_t port);       // set before Start; 0 asks the OS for an ephemeral port
 bool Send(uint64_t peer, Channel channel, const void* data, size_t size);
 const char* BackendName();
 

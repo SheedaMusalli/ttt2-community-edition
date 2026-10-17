@@ -5,12 +5,14 @@ For Internet deployment, place behind a TLS reverse proxy (see deploy/).
 """
 import argparse
 import hashlib
+import ipaddress
 import json
 import re
 import secrets
 import sqlite3
 import time
 import hmac
+import threading
 from contextlib import closing, contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import os
@@ -33,6 +35,25 @@ def label(value):
     return value
 
 
+def listen_endpoint(value):
+    """Validate a client-advertised IPv4 UDP endpoint; this does not prove reachability."""
+    if value is None:
+        return None
+    if not isinstance(value, str) or len(value) > 64 or value.count(':') != 1:
+        raise Rejected(400, 'listen_endpoint must be an IPv4 address and UDP port')
+    address, raw_port = value.rsplit(':', 1)
+    if not re.fullmatch(r'[0-9]{1,5}', raw_port):
+        raise Rejected(400, 'listen_endpoint must be an IPv4 address and UDP port')
+    try:
+        parsed = ipaddress.ip_address(address)
+        port = int(raw_port, 10)
+    except (ValueError, TypeError):
+        raise Rejected(400, 'listen_endpoint must be an IPv4 address and UDP port')
+    if parsed.version != 4 or parsed.is_unspecified or parsed.is_multicast or parsed.is_reserved or not 1 <= port <= 65535:
+        raise Rejected(400, 'listen_endpoint must be a usable IPv4 UDP endpoint')
+    return f'{parsed.compressed}:{port}'
+
+
 class RankedStore:
     def __init__(self, path, clock=time.time):
         self.path, self.clock = str(path), clock
@@ -43,7 +64,8 @@ class RankedStore:
                     rating INTEGER NOT NULL DEFAULT 1000, games INTEGER NOT NULL DEFAULT 0);
                 CREATE TABLE IF NOT EXISTS queue(
                     player TEXT PRIMARY KEY REFERENCES players(id), build TEXT NOT NULL,
-                    region TEXT NOT NULL, expires REAL NOT NULL, joined REAL NOT NULL);
+                    region TEXT NOT NULL, expires REAL NOT NULL, joined REAL NOT NULL,
+                    listen_endpoint TEXT);
                 CREATE TABLE IF NOT EXISTS matches(
                     id TEXT PRIMARY KEY, a TEXT NOT NULL, b TEXT NOT NULL,
                     build TEXT NOT NULL, region TEXT NOT NULL, expires REAL NOT NULL,
@@ -57,6 +79,13 @@ class RankedStore:
                                ("forfeit_claim", "TEXT"), ("forfeit_at", "REAL")):
                 if name not in columns:
                     db.execute(f"ALTER TABLE matches ADD COLUMN {name} {kind}")
+            queue_columns = {r[1] for r in db.execute("PRAGMA table_info(queue)")}
+            if 'listen_endpoint' not in queue_columns:
+                db.execute("ALTER TABLE queue ADD COLUMN listen_endpoint TEXT")
+            match_columns = {r[1] for r in db.execute("PRAGMA table_info(matches)")}
+            for name in ('endpoint_a', 'endpoint_b', 'session_key'):
+                if name not in match_columns:
+                    db.execute(f"ALTER TABLE matches ADD COLUMN {name} TEXT")
 
     def connect(self):
         db = sqlite3.connect(self.path, timeout=10)
@@ -82,9 +111,12 @@ class RankedStore:
         if player == 'draw':
             raise Rejected(400, 'draw is reserved for result reporting')
         token = secrets.token_urlsafe(32)
-        with self.transaction() as db:
-            db.execute("INSERT INTO players(id,token_hash) VALUES (?,?)",
-                       (player, hashlib.sha256(token.encode()).hexdigest()))
+        try:
+            with self.transaction() as db:
+                db.execute("INSERT INTO players(id,token_hash) VALUES (?,?)",
+                           (player, hashlib.sha256(token.encode()).hexdigest()))
+        except sqlite3.IntegrityError:
+            raise Rejected(409, 'player identifier is already registered')
         return token
 
     def expire(self, db):
@@ -127,7 +159,11 @@ class RankedStore:
         result = {"id": match['id'], "state": match['state'], "build": match['build'],
                   "region": match['region'], "expires": match['expires']}
         if player in (match['a'], match['b']):
-            result.update(player_a=match['a'], player_b=match['b'], match_token=match['connect_token'])
+            is_a = player == match['a']
+            result.update(player_a=match['a'], player_b=match['b'], match_token=match['connect_token'],
+                          role='host' if is_a else 'guest',
+                          opponent_endpoint=match['endpoint_b' if is_a else 'endpoint_a'],
+                          session_key_bytes=match['session_key'])
         return result
 
     def dispatch(self, token, operation, data):
@@ -155,19 +191,25 @@ class RankedStore:
                     q = db.execute("SELECT expires FROM queue WHERE player=?", (player,)).fetchone()
                     return dict(state='queued', expires=q[0]) if q else dict(state='idle')
                 build, region = label(data.get('build')), label(data.get('region'))
+                endpoint = listen_endpoint(data.get('listen_endpoint'))
                 # One atomic transaction reserves both players; clients cannot choose ratings.
-                db.execute("""INSERT INTO queue VALUES (?,?,?,?,?) ON CONFLICT(player) DO UPDATE SET
-                           build=excluded.build,region=excluded.region,expires=excluded.expires""",
-                           (player, build, region, now + 30, now))
-                other = db.execute("""SELECT q.player FROM queue q JOIN players p ON p.id=q.player
+                db.execute("""INSERT INTO queue(player,build,region,expires,joined,listen_endpoint)
+                           VALUES (?,?,?,?,?,?) ON CONFLICT(player) DO UPDATE SET
+                           build=excluded.build,region=excluded.region,expires=excluded.expires,
+                           listen_endpoint=excluded.listen_endpoint""",
+                           (player, build, region, now + 30, now, endpoint))
+                other = db.execute("""SELECT q.player,q.listen_endpoint FROM queue q JOIN players p ON p.id=q.player
                            WHERE q.player<>? AND q.build=? AND q.region=? AND ABS(p.rating-?)<=200
                            ORDER BY q.joined,q.player LIMIT 1""", (player, build, region, row['rating'])).fetchone()
                 if not other:
                     return dict(state='queued', expires=now + 30)
                 mid = secrets.token_hex(16)
                 token = secrets.token_urlsafe(32)
-                db.execute("INSERT INTO matches(id,a,b,build,region,expires,state,connect_token) VALUES (?,?,?,?,?,?,'reserved',?)",
-                           (mid, other[0], player, build, region, now + 30, token))
+                session_key = secrets.token_hex(16)
+                db.execute("""INSERT INTO matches(id,a,b,build,region,expires,state,connect_token,
+                           endpoint_a,endpoint_b,session_key) VALUES (?,?,?,?,?,?,'reserved',?,?,?,?)""",
+                           (mid, other[0], player, build, region, now + 30, token,
+                            other['listen_endpoint'], endpoint, session_key))
                 db.execute("DELETE FROM queue WHERE player IN (?,?)", (player, other[0]))
                 return self.match_response(db.execute("SELECT * FROM matches WHERE id=?", (mid,)).fetchone(), player)
             if operation not in ('match', 'ready', 'report', 'abort', 'heartbeat', 'forfeit'):
@@ -226,7 +268,17 @@ class RankedStore:
             return self.match_response(db.execute("SELECT * FROM matches WHERE id=?", (mid,)).fetchone(), player)
 
 
-def make_server(store, port=8765, host='127.0.0.1'):
+def make_server(store, port=8765, host='127.0.0.1', allow_registration=None):
+    if allow_registration is None:
+        try:
+            local_bind = host.lower() == 'localhost' or ipaddress.ip_address(host).is_loopback
+        except ValueError:
+            local_bind = False
+        allow_registration = local_bind or os.environ.get('TTT2_RANKED_ALLOW_REGISTRATION') == '1'
+    registration_attempts = {}
+    registration_lock = threading.Lock()
+    trust_proxy = os.environ.get('TTT2_RANKED_TRUST_PROXY') == '1'
+
     class Handler(BaseHTTPRequestHandler):
         protocol_version = 'HTTP/1.1'
 
@@ -259,14 +311,38 @@ def make_server(store, port=8765, host='127.0.0.1'):
                 size = int(self.headers.get('Content-Length', '-1'))
                 if not 0 <= size <= 4096:
                     raise Rejected(413, 'body must be at most 4096 bytes')
-                auth = self.headers.get('Authorization', '')
-                if not auth.startswith('Bearer ') or len(auth) > 256:
-                    raise Rejected(401, 'bearer token required')
-                if not self.path.startswith('/v1/'):
-                    raise Rejected(404, 'unknown endpoint')
-                data = json.loads(self.rfile.read(size))
-                result = store.dispatch(auth[7:], self.path[4:], data)
-                status = 200
+                if self.path == '/v1/register':
+                    if not allow_registration:
+                        raise Rejected(403, 'self-registration is disabled on this server')
+                    data = json.loads(self.rfile.read(size))
+                    if not isinstance(data, dict) or set(data) != {'player'}:
+                        raise Rejected(400, 'expected a player identifier')
+                    now = time.monotonic()
+                    client = self.client_address[0]
+                    if trust_proxy:
+                        forwarded = self.headers.get('X-Forwarded-For', '').split(',', 1)[0].strip()
+                        try:
+                            client = str(ipaddress.ip_address(forwarded))
+                        except ValueError:
+                            pass
+                    with registration_lock:
+                        attempts = [stamp for stamp in registration_attempts.get(client, []) if now - stamp < 3600]
+                        if len(attempts) >= 5:
+                            raise Rejected(429, 'registration limit reached; try again later')
+                        attempts.append(now)
+                        registration_attempts[client] = attempts
+                    token = store.provision(data['player'])
+                    result = dict(id=data['player'], token=token)
+                    status = 201
+                else:
+                    auth = self.headers.get('Authorization', '')
+                    if not auth.startswith('Bearer ') or len(auth) > 256:
+                        raise Rejected(401, 'bearer token required')
+                    if not self.path.startswith('/v1/'):
+                        raise Rejected(404, 'unknown endpoint')
+                    data = json.loads(self.rfile.read(size))
+                    result = store.dispatch(auth[7:], self.path[4:], data)
+                    status = 200
             except Rejected as error:
                 status, result = error.status, dict(error=error.message)
             except (ValueError, UnicodeError):

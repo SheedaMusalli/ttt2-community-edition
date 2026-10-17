@@ -1,21 +1,21 @@
 # Tekken Tag Tournament 2 Community Edition
 
-An unofficial Windows community project for running *Tekken Tag Tournament 2* through a native static recompilation. This v2 update focuses on launcher controls, local keyboard play, graphics initialization, and performance diagnostics. It is not affiliated with Bandai Namco, Microsoft, or Valve.
+An unofficial Windows community project for running *Tekken Tag Tournament 2* through a native static recompilation. Version 2.1 focuses on a cleaner launcher, configurable local controls, and standalone ranked-service foundations. It is not affiliated with Bandai Namco, Microsoft, or Valve.
 
 ## Current features
 
-- **Launcher settings:** Configure display mode, output resolution, render scale, input polling (250, 500, 750, or 1000 Hz), save location, and shader options. Launcher pages expand and center on wide windows, adapt control layouts to available width, and scroll when a page is taller than the window.
+- **Launcher settings:** Configure display mode, output resolution, render scale, input polling (250, 500, 750, or 1000 Hz), save location, and shader options. The launcher repaints its window through a buffered paint pass, keeps the footer fixed, hides the native scrollbar, and supports mouse-wheel scrolling when a small or high-DPI window needs more room.
 - **Keyboard controls:** Click a binding and press a key to assign it. Player 1 and Player 2 each have D-pad, face, shoulder, Start/Back, LS click, RS click, and LS/RS directional bindings. The in-game keyboard setup reads and edits Player 1's saved bindings.
 - **Local two-player keyboard play:** Enable **Player 2 keyboard** in Controls to publish a separate second keyboard pad alongside Player 1. Player 2 has its own default layout and can be rebound independently. A physical controller remains supported. Spacebar has no hidden Start/menu action; bind it explicitly if desired.
 - **Performance overlay:** Choose FPS, frame-time graph, CPU/GPU utilization, system and process memory, GPU memory, and CPU/GPU temperature metrics. Temperature readings can be unavailable when Windows or the hardware does not expose a supported sensor.
 - **Shader cache warm-up:** Previously cached D3D11 shader variants are prepared before the first game draw. The warm-up window reports progress, known variant count, and an ETA. A shader variant the game has never encountered cannot be compiled in advance; it is compiled when first discovered and can still cause a hitch.
 - **Graphics path:** The runtime provides Direct3D 11 hardware rendering and a software fallback. D3D12, Vulkan, FSR, and DLSS are not implemented. GPU rendering accelerates supported rasterization and pixel-shader work, while guest command processing and some vertex work still use the CPU.
 - **Save tools:** Choose a save folder and create or restore local save backups from the launcher.
-- **Ranked-service prototype:** The launcher can contact a self-hosted service, request a profile, enter or cancel a queue, and refresh status. The Python standard-library service stores reservations and provisional ratings.
+- **Ranked-service prototype:** The launcher can contact a self-hosted service, create a player identity, save the returned bearer token encrypted with Windows DPAPI, validate the token, request a profile, enter or cancel a queue, and refresh status. Local loopback servers allow registration by default. Remote deployments keep it disabled unless the operator explicitly enables it; the service applies a basic per-IP registration limit. The Python standard-library service stores reservations and provisional ratings.
 
 ## Important limitations
 
-The ranked service does not connect two game sessions or carry fight traffic. A queue reservation does not start a match, and ratings are based on client reports rather than trusted game results. Full ranked play still needs a verified game-session adapter, gameplay transport, and tests between separate clients. This project does not spoof Xbox Live or bypass game-license checks. App ID 480 is rejected; Steam integration requires an authorized app ID and SDK.
+The ranked service does not yet connect two game sessions or carry fight traffic. A queue reservation does not start an in-game match, and ratings are based on client reports rather than trusted game results. The current IPv4/ENet signaling and socket-routing code is host-side groundwork; guest ABI and in-game session integration remain unverified. Full ranked play still needs a verified game-session adapter and two-machine game testing. This project does not spoof Xbox Live or bypass game-license checks. App ID 480 is rejected; Steam integration requires an authorized app ID and SDK.
 
 The game loop currently runs at approximately 60 simulation updates per second. A high-refresh display can improve scanout, but does not make the game produce 180 unique simulation frames per second. Reported stage-specific slowdowns have not been reproduced and validated across every stage; the overlay and logs are diagnostic tools, not a guarantee that all frame drops are fixed.
 
@@ -41,14 +41,13 @@ Run the input-polling harness:
 python port/tools/test_input_polling.py
 ```
 
-Start a local service after provisioning test accounts:
+Start a local service for testing. The launcher Online page can register a new identity and save its bearer token automatically:
 
 ```powershell
-python port/tools/ranked_service.py --db ranked.sqlite3 provision player_one
 python port/tools/ranked_service.py --db ranked.sqlite3 serve
 ```
 
-`provision` prints a bearer token once. Keep it private. Provision a second player with a different ID to test matchmaking. The launcher defaults to `http://127.0.0.1:8765` and requires HTTPS for non-local servers. See [deploy/README.md](deploy/README.md) for the experimental Docker Compose setup.
+The launcher defaults to `http://127.0.0.1:8765` and requires HTTPS for non-local servers. The local service accepts self-registration by default; a remote service requires an operator to set `TTT2_RANKED_ALLOW_REGISTRATION=1` and should sit behind HTTPS. See [deploy/README.md](deploy/README.md) for the experimental Docker Compose setup and [RANKED_FOUNDATIONS.md](RANKED_FOUNDATIONS.md) for current runtime integration limits.
 
 ## Contributing
 

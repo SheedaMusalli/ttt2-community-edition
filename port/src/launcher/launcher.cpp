@@ -17,6 +17,7 @@
 #include <dwmapi.h>
 #include <winhttp.h>
 #include <wincrypt.h>
+#include <bcrypt.h>
 #include <uxtheme.h>
 #include <algorithm>
 #include <array>
@@ -52,7 +53,7 @@ enum : int { ID_HOME=100, ID_GRAPHICS, ID_PERFORMANCE, ID_GAME, ID_ADVANCED, ID_
              ID_OPEN_INSTALL=230, ID_OPEN_LOG, ID_VERIFY, ID_SAVE_BACKUP=240, ID_OPEN_CONFIG, ID_SAVE_RESTORE,
              ID_CLOSE_ON_LAUNCH=250, ID_OVERLAY_FIRST=260, ID_KEY_FIRST=300, ID_RANKED_URL=340, ID_RANKED_TOKEN,
              ID_RANKED_BUILD, ID_RANKED_REGION, ID_RANKED_HEALTH, ID_RANKED_PROFILE,
-             ID_RANKED_QUEUE, ID_RANKED_STATUS, ID_RANKED_CANCEL, ID_RANKED_RESULT,
+             ID_RANKED_QUEUE, ID_RANKED_STATUS, ID_RANKED_CANCEL, ID_RANKED_RESULT, ID_RANKED_REGISTER,
              ID_KEY2_FIRST=420, ID_PLAYER2_ENABLED=450, ID_CONTROL_PLAYER1=451, ID_CONTROL_PLAYER2=452 };
 enum Tab { Home, Graphics, Performance, Game, Advanced, Controls, Online };
 struct Settings {
@@ -83,10 +84,14 @@ std::array<HWND,7> g_nav{};
 HWND g_status = nullptr, g_play = nullptr;
 HANDLE g_gameProcess = nullptr;
 std::atomic<bool> g_rankedBusy{false};
+bool g_registrationValidation = false;
 int g_controlPlayer = 0;
 int g_capturingKey = -1;
 int g_contentX = kContentMargin, g_contentWidth = 1032, g_scrollOffset = 0, g_pageBottom = 0;
 int g_viewportTop = 136, g_viewportBottom = 648;
+constexpr UINT WM_RANKED_REGISTER_COMPLETE = WM_APP + 7;
+
+struct RankedRegistrationResult { std::wstring response; };
 
 void UpdateContentGeometry(int clientWidth) {
     g_contentWidth = (std::min)(kMaxContentWidth, (std::max)(500, clientWidth - 2*kContentMargin));
@@ -98,10 +103,7 @@ void ReflowPage(HWND hwnd) {
     g_viewportBottom = (std::max)(g_viewportTop + 80, int(client.bottom) - kFooterHeight - 10);
     const int maxOffset = (std::max)(0, g_pageBottom - g_viewportBottom);
     g_scrollOffset = std::clamp(g_scrollOffset, 0, maxOffset);
-    SCROLLINFO si{sizeof(si), SIF_RANGE|SIF_PAGE|SIF_POS};
-    si.nMin=0; si.nPage=UINT(g_viewportBottom-g_viewportTop);
-    si.nMax=maxOffset+int(si.nPage)-1; si.nPos=g_scrollOffset;
-    SetScrollInfo(hwnd,SB_VERT,&si,TRUE);
+    ShowScrollBar(hwnd, SB_VERT, FALSE);
     for (const auto& item:g_pageItems) {
         RECT r=item.bounds;
         const int height=r.bottom-r.top;
@@ -110,6 +112,16 @@ void ReflowPage(HWND hwnd) {
         const bool visible=r.top>=g_viewportTop && r.bottom<=g_viewportBottom;
         ShowWindow(item.hwnd,visible?SW_SHOW:SW_HIDE);
     }
+}
+
+LRESULT CALLBACK WheelForwardSubclass(HWND control, UINT msg, WPARAM wp, LPARAM lp,
+                                      UINT_PTR subclassId, DWORD_PTR reference) {
+    if (msg == WM_MOUSEWHEEL && GetParent(control)) {
+        PostMessageW(GetParent(control), WM_MOUSEWHEEL, wp, lp);
+        return 0;
+    }
+    if (msg == WM_NCDESTROY) RemoveWindowSubclass(control, WheelForwardSubclass, subclassId);
+    return DefSubclassProc(control, msg, wp, lp);
 }
 
 const wchar_t* ControlNames[24]{L"D-pad Up",L"D-pad Down",L"D-pad Left",L"D-pad Right",
@@ -329,6 +341,52 @@ std::wstring RankedRequest(const std::wstring& base,const std::wstring& bearer,c
     if(!received)return L"Request failed or timed out. Check the URL and server.";
     body=RedactMatchToken(body);return L"HTTP "+std::to_wstring(status)+L"\r\n"+FromUtf8(body);
 }
+std::string NewPlayerId() {
+    wchar_t username[128]{};
+    DWORD length=GetEnvironmentVariableW(L"USERNAME",username,static_cast<DWORD>(std::size(username)));
+    std::string prefix;
+    if(length>0&&length<std::size(username)) {
+        const std::string utf8=Utf8(username);
+        for(unsigned char c:utf8)if((c>='a'&&c<='z')||(c>='A'&&c<='Z')||(c>='0'&&c<='9')){
+            prefix.push_back(char(c>='A'&&c<='Z'?c+('a'-'A'):c));if(prefix.size()==32)break;
+        }
+    }
+    if(prefix.empty())prefix="player";
+    std::array<UCHAR,4> random{};
+    if(BCryptGenRandom(nullptr,random.data(),static_cast<ULONG>(random.size()),BCRYPT_USE_SYSTEM_PREFERRED_RNG)!=0)
+        return {};
+    static constexpr char hex[]="0123456789abcdef";
+    std::string id=prefix+"-";
+    for(UCHAR byte:random){id.push_back(hex[byte>>4]);id.push_back(hex[byte&15]);}
+    return id;
+}
+std::wstring RegistrationToken(const std::wstring& response) {
+    const size_t marker=response.find(L"\"token\"");
+    if(marker==std::wstring::npos)return {};
+    const size_t colon=response.find(L':',marker+7);
+    if(colon==std::wstring::npos)return {};
+    const size_t quote=response.find(L'\"',colon+1);
+    if(quote==std::wstring::npos)return {};
+    const size_t end=response.find(L'\"',quote+1);
+    if(end==std::wstring::npos)return {};
+    const std::wstring token=response.substr(quote+1,end-quote-1);
+    if(token.size()<32||token.size()>128)return {};
+    for(wchar_t c:token)if(!((c>=L'a'&&c<=L'z')||(c>=L'A'&&c<=L'Z')||(c>=L'0'&&c<=L'9')||c==L'_'||c==L'-'))return {};
+    return token;
+}
+void StartRankedRegistration() {
+    if(g_rankedBusy.exchange(true))return;
+    const std::wstring base=ControlText(ID_RANKED_URL);
+    const std::string player=NewPlayerId();
+    if(player.empty()){g_rankedBusy=false;SetWindowTextW(g_status,L"Secure token generation failed.");return;}
+    SaveRankedSettings();
+    for(HWND h:{GetDlgItem(g_window,ID_RANKED_HEALTH),GetDlgItem(g_window,ID_RANKED_REGISTER),GetDlgItem(g_window,ID_RANKED_PROFILE),GetDlgItem(g_window,ID_RANKED_QUEUE),GetDlgItem(g_window,ID_RANKED_STATUS),GetDlgItem(g_window,ID_RANKED_CANCEL)})if(h)EnableWindow(h,FALSE);
+    SetWindowTextW(GetDlgItem(g_window,ID_RANKED_RESULT),L"Creating a new player identity...");
+    SetWindowTextW(g_status,L"Registering account with ranked service");
+    const HWND target=g_window;
+    const std::string payload=std::string("{\"player\":\"")+player+"\"}";
+    std::thread([target,base,payload]{auto* result=new RankedRegistrationResult{RankedRequest(base,L"",L"/v1/register",payload)};if(!PostMessageW(target,WM_RANKED_REGISTER_COMPLETE,0,reinterpret_cast<LPARAM>(result)))delete result;}).detach();
+}
 void StartRankedRequest(int action) {
     if(g_rankedBusy.exchange(true))return;
     const std::wstring base=ControlText(ID_RANKED_URL),token=ControlText(ID_RANKED_TOKEN),build=ControlText(ID_RANKED_BUILD),region=ControlText(ID_RANKED_REGION);
@@ -339,7 +397,7 @@ void StartRankedRequest(int action) {
     case ID_RANKED_QUEUE:route=L"/v1/queue";payload="{\"build\":"+JsonString(build)+",\"region\":"+JsonString(region)+"}";break;
     case ID_RANKED_STATUS:route=L"/v1/status";payload="{\"build\":"+JsonString(build)+",\"region\":"+JsonString(region)+"}";break;
     case ID_RANKED_CANCEL:route=L"/v1/cancel";payload="{}";break;default:g_rankedBusy=false;return;}
-    for(HWND h:{GetDlgItem(g_window,ID_RANKED_HEALTH),GetDlgItem(g_window,ID_RANKED_PROFILE),GetDlgItem(g_window,ID_RANKED_QUEUE),GetDlgItem(g_window,ID_RANKED_STATUS),GetDlgItem(g_window,ID_RANKED_CANCEL)})if(h)EnableWindow(h,FALSE);
+    for(HWND h:{GetDlgItem(g_window,ID_RANKED_HEALTH),GetDlgItem(g_window,ID_RANKED_REGISTER),GetDlgItem(g_window,ID_RANKED_PROFILE),GetDlgItem(g_window,ID_RANKED_QUEUE),GetDlgItem(g_window,ID_RANKED_STATUS),GetDlgItem(g_window,ID_RANKED_CANCEL)})if(h)EnableWindow(h,FALSE);
     SetWindowTextW(GetDlgItem(g_window,ID_RANKED_RESULT),L"Contacting ranked service...");SetWindowTextW(g_status,L"Ranked service request in progress");
     const HWND target=g_window;
     std::thread([target,base,token,route,payload]{auto* result=new std::wstring(RankedRequest(base,token,route,payload));if(!PostMessageW(target,WM_APP+6,0,(LPARAM)result))delete result;}).detach();
@@ -349,7 +407,7 @@ HWND Add(int id, const wchar_t* cls, const wchar_t* text, DWORD style, int x,int
     if (wcscmp(cls,L"COMBOBOX")==0) style|=CBS_OWNERDRAWFIXED|CBS_HASSTRINGS;
     HWND control=CreateWindowExW(0,cls,text,WS_CHILD|WS_VISIBLE|style,x,y,w,h,g_window,(HMENU)(INT_PTR)id,
         GetModuleHandleW(nullptr),nullptr);
-    if(control){SendMessageW(control,WM_SETFONT,(WPARAM)g_bodyFont,TRUE);if(wcscmp(cls,L"COMBOBOX")==0){SetWindowTheme(control,L"DarkMode_Explorer",nullptr);SetWindowSubclass(control,DarkComboSubclass,(UINT_PTR)id,0);}else if(wcscmp(cls,L"EDIT")==0)SetWindowTheme(control,L"DarkMode_Explorer",nullptr);g_page.push_back(control);g_pageItems.push_back({control,RECT{x,y,x+w,y+h}});g_pageBottom=(std::max)(g_pageBottom,y+h);}
+    if(control){SendMessageW(control,WM_SETFONT,(WPARAM)g_bodyFont,TRUE);if(wcscmp(cls,L"COMBOBOX")==0){SetWindowTheme(control,L"DarkMode_Explorer",nullptr);SetWindowSubclass(control,DarkComboSubclass,(UINT_PTR)id,0);}else if(wcscmp(cls,L"EDIT")==0)SetWindowTheme(control,L"DarkMode_Explorer",nullptr);SetWindowSubclass(control,WheelForwardSubclass,0,0);g_page.push_back(control);g_pageItems.push_back({control,RECT{x,y,x+w,y+h}});g_pageBottom=(std::max)(g_pageBottom,y+h);}
     return control;
 }
 void Label(const wchar_t* text,int x,int y,int w,int h,bool muted=false) {
@@ -358,8 +416,9 @@ void Label(const wchar_t* text,int x,int y,int w,int h,bool muted=false) {
 }
 void Select(HWND combo,int index) { if(combo) SendMessageW(combo,CB_SETCURSEL,index,0); }
 HWND Combo(int id,int x,int y,int width,const std::vector<std::wstring>& items,int selected) {
-    HWND c=Add(id,L"COMBOBOX",L"",CBS_DROPDOWNLIST|WS_VSCROLL|WS_TABSTOP,x,y,width,220);
+    HWND c=Add(id,L"COMBOBOX",L"",CBS_DROPDOWNLIST|WS_TABSTOP,x,y,width,32);
     for(const auto& item:items) SendMessageW(c,CB_ADDSTRING,0,(LPARAM)item.c_str());
+    SendMessageW(c,CB_SETMINVISIBLE,(WPARAM)(std::min)(items.size(),size_t(8)),0);
     Select(c,selected);
     return c;
 }
@@ -406,32 +465,26 @@ void BuildPage() {
     }
     case Graphics:
         Heading(L"GRAPHICS",L"Set the display and rendering options for your screen.");
-        SectionTitle(L"WINDOW",214);
-        Field(L"Display mode",252,ID_MODE,{L"Windowed",L"Borderless",L"Fullscreen"},g_settings.mode);
-        Label(L"Borderless fills the desktop without changing its display mode.",g_contentX+2,286,760,24,true);
-        Field(L"Output resolution",324,ID_RESOLUTION,{L"1280 x 720",L"1600 x 900",L"1920 x 1080",L"2560 x 1440",L"3840 x 2160"},g_settings.resolution);
-        Label(L"Higher resolutions are sharper and use more graphics memory.",g_contentX+2,358,760,24,true);
-        SectionTitle(L"RENDER SCALE",404);
-        Field(L"Internal render scale",442,ID_SCALE,{L"Auto (follows resolution)",L"1.0x",L"1.25x",L"1.5x",L"2.0x",L"3.0x"},g_settings.scale);
-        Label(L"Larger scales can improve clarity and use more graphics memory.",g_contentX+2,476,760,24,true);
-        Label(L"Changes apply when you next launch the game.",g_contentX+2,520,700,25,true);
+        SectionTitle(L"DISPLAY",214);
+        Field(L"Window mode",250,ID_MODE,{L"Windowed",L"Borderless",L"Fullscreen"},g_settings.mode);
+        Field(L"Output resolution",294,ID_RESOLUTION,{L"1280 x 720",L"1600 x 900",L"1920 x 1080",L"2560 x 1440",L"3840 x 2160"},g_settings.resolution);
+        Field(L"Internal render scale",338,ID_SCALE,{L"Auto (follows resolution)",L"1.0x",L"1.25x",L"1.5x",L"2.0x",L"3.0x"},g_settings.scale);
+        Label(L"Changes apply when you next launch the game.",g_contentX+2,386,700,25,true);
         break;
     case Performance:
         Heading(L"PERFORMANCE",L"Choose how shader work is scheduled.");
         SectionTitle(L"SHADER COMPILATION",214);
-        Check(ID_ASYNC,L"Compile new shaders in the background",g_contentX+2,253,g_settings.asyncShaders);
-        Label(L"Reduces stalls when the game encounters a shader for the first time.",g_contentX+26,283,750,25,true);
-        Check(ID_WARM,L"Prepare saved shaders while the game starts",g_contentX+2,327,g_settings.warmShaders);
-        Label(L"Uses previously seen shaders to reduce later loading pauses.",g_contentX+26,357,750,25,true);
-        Check(ID_FAST,L"Use fast shader compilation during a match",g_contentX+2,401,g_settings.fastShaders);
-        Label(L"Can reduce first-use pauses; optimized results are cached for later launches.",g_contentX+26,431,750,42,true);
-        SectionTitle(L"CONTROLLER INPUT POLLING",500);
-        Field(L"Input polling rate",538,ID_INPUT_POLL_RATE,
+        Check(ID_ASYNC,L"Compile new shaders in the background",g_contentX+2,248,g_settings.asyncShaders);
+        Check(ID_WARM,L"Prepare saved shaders while the game starts",g_contentX+2,280,g_settings.warmShaders);
+        Check(ID_FAST,L"Use fast shader compilation during a match",g_contentX+2,312,g_settings.fastShaders);
+        Label(L"Background work reduces some first-use stalls; unseen shaders still compile when encountered.",g_contentX+26,344,850,24,true);
+        SectionTitle(L"CONTROLLER INPUT POLLING",378);
+        Field(L"Input polling rate",414,ID_INPUT_POLL_RATE,
               {L"250 Hz",L"500 Hz",L"750 Hz",L"1000 Hz"},
               g_settings.inputPollRateHz == 250 ? 0 : g_settings.inputPollRateHz == 500 ? 1 :
               g_settings.inputPollRateHz == 750 ? 2 : 3);
         Label(L"Samples controller and keyboard input at this rate. Higher rates respond sooner and use more CPU; applies next launch.",
-              g_contentX+2,574,840,42,true);
+              g_contentX+2,456,840,36,true);
         break;
     case Game: {
         Heading(L"GAME",L"Game data, local saves and graphics device.");
@@ -497,7 +550,9 @@ void BuildPage() {
         Add(ID_RANKED_URL,L"EDIT",LoadRankedValue(L"Url",L"http://127.0.0.1:8765").c_str(),WS_BORDER|ES_AUTOHSCROLL|WS_TABSTOP,g_contentX+180,249,(std::min)(630,g_contentWidth-190),28);
         Label(L"Account token",g_contentX+2,291,175,24);
         std::wstring secret=LoadRankedToken();
-        Add(ID_RANKED_TOKEN,L"EDIT",secret.c_str(),WS_BORDER|ES_AUTOHSCROLL|ES_PASSWORD|WS_TABSTOP,g_contentX+180,287,(std::min)(630,g_contentWidth-190),28);
+        const int tokenWidth=(std::max)(220,(std::min)(500,g_contentWidth-370));
+        Add(ID_RANKED_TOKEN,L"EDIT",secret.c_str(),WS_BORDER|ES_AUTOHSCROLL|ES_PASSWORD|WS_TABSTOP,g_contentX+180,287,tokenWidth,32);
+        Add(ID_RANKED_REGISTER,L"BUTTON",L"GENERATE TOKEN",BS_PUSHBUTTON|WS_TABSTOP,g_contentX+192+tokenWidth,287,160,32);
         Label(L"Use the bearer token issued by the service administrator. It is saved encrypted for this Windows account.",g_contentX+180,319,(std::min)(680,g_contentWidth-190),40,true);
         Label(L"Build",g_contentX+2,369,175,24);
         Add(ID_RANKED_BUILD,L"EDIT",LoadRankedValue(L"Build",L"ttt2-community").c_str(),WS_BORDER|ES_AUTOHSCROLL|WS_TABSTOP,g_contentX+180,365,(std::min)(300,(g_contentWidth-210)/2),28);
@@ -510,7 +565,7 @@ void BuildPage() {
         Add(ID_RANKED_STATUS,L"BUTTON",L"UPDATE STATUS",BS_PUSHBUTTON|WS_TABSTOP,g_contentX+466,462,145,34);
         Add(ID_RANKED_CANCEL,L"BUTTON",L"CANCEL SEARCH",BS_PUSHBUTTON|WS_TABSTOP,g_contentX+624,462,155,34);
         Label(L"Service responses (reservation secrets are hidden):",g_contentX+2,504,700,24,true);
-        Add(ID_RANKED_RESULT,L"EDIT",L"Server connection has not been checked.",WS_BORDER|ES_MULTILINE|ES_READONLY|ES_AUTOVSCROLL|WS_VSCROLL|WS_TABSTOP,g_contentX+2,532,(std::min)(810,g_contentWidth-4),92);
+        Add(ID_RANKED_RESULT,L"EDIT",L"Server connection has not been checked.",WS_BORDER|ES_MULTILINE|ES_READONLY|ES_AUTOVSCROLL|WS_TABSTOP,g_contentX+2,532,(std::min)(810,g_contentWidth-4),92);
         break;
     }
     }
@@ -650,23 +705,33 @@ LRESULT CALLBACK Proc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
         }
         g_scrollOffset=std::clamp(si.nPos,0,maxOffset);ReflowPage(hwnd);return 0;
     }
-    case WM_ERASEBKGND: {
-        RECT r{};GetClientRect(hwnd,&r);HDC dc=(HDC)wp;
-        HBRUSH bg=CreateSolidBrush(kBg);FillRect(dc,&r,bg);DeleteObject(bg);
-        RECT top{0,0,r.right,136};HBRUSH sb=CreateSolidBrush(kSidebar);FillRect(dc,&top,sb);DeleteObject(sb);
-        RECT foot{0,r.bottom-kFooterHeight,r.right,r.bottom};HBRUSH fb=CreateSolidBrush(kSidebar);FillRect(dc,&foot,fb);DeleteObject(fb);
-        HPEN pen=CreatePen(PS_SOLID,1,kLine);auto old=(HPEN)SelectObject(dc,pen);MoveToEx(dc,0,foot.top,nullptr);LineTo(dc,r.right,foot.top);SelectObject(dc,old);DeleteObject(pen);
-        SetBkMode(dc,TRANSPARENT);SetTextColor(dc,kCream);
-        HFONT logo=CreateFontW(-22,0,0,0,FW_BOLD,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH,L"Segoe UI Variable Display");
-        auto of=(HFONT)SelectObject(dc,logo);RECT lr{34,12,500,44};DrawTextW(dc,L"TEKKEN TAG TOURNAMENT 2",-1,&lr,DT_LEFT|DT_TOP|DT_NOCLIP);SelectObject(dc,of);DeleteObject(logo);
-        HFONT sub=CreateFontW(-11,0,0,0,FW_SEMIBOLD,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH,L"Segoe UI");
-        of=(HFONT)SelectObject(dc,sub);SetTextColor(dc,kMuted);RECT sr{36,47,390,66};DrawTextW(dc,L"COMMUNITY EDITION  /  SHEEDA MUSALLI",-1,&sr,DT_LEFT|DT_TOP|DT_NOCLIP);SelectObject(dc,of);DeleteObject(sub);
-        HPEN streak=CreatePen(PS_SOLID,3,kRed);HGDIOBJ oldStreak=SelectObject(dc,streak);MoveToEx(dc,r.right-142,12,nullptr);LineTo(dc,r.right-70,70);SelectObject(dc,oldStreak);DeleteObject(streak);
-        streak=CreatePen(PS_SOLID,2,kBlue);oldStreak=SelectObject(dc,streak);MoveToEx(dc,r.right-112,10,nullptr);LineTo(dc,r.right-42,68);SelectObject(dc,oldStreak);DeleteObject(streak);
-        return 1;
+    case WM_ERASEBKGND: return 1;
+    case WM_PAINT: {
+        PAINTSTRUCT paint{};HDC target=BeginPaint(hwnd,&paint);
+        RECT bounds{};GetClientRect(hwnd,&bounds);
+        HDC buffer=CreateCompatibleDC(target);
+        HBITMAP bitmap=CreateCompatibleBitmap(target,(std::max)(1L,bounds.right),(std::max)(1L,bounds.bottom));
+        if(buffer&&bitmap){HGDIOBJ oldBitmap=SelectObject(buffer,bitmap);
+            HBRUSH bg=CreateSolidBrush(kBg);FillRect(buffer,&bounds,bg);DeleteObject(bg);
+            RECT top{0,0,bounds.right,136};HBRUSH sb=CreateSolidBrush(kSidebar);FillRect(buffer,&top,sb);DeleteObject(sb);
+            RECT foot{0,bounds.bottom-kFooterHeight,bounds.right,bounds.bottom};HBRUSH fb=CreateSolidBrush(kSidebar);FillRect(buffer,&foot,fb);DeleteObject(fb);
+            HPEN pen=CreatePen(PS_SOLID,1,kLine);auto oldPen=SelectObject(buffer,pen);MoveToEx(buffer,0,foot.top,nullptr);LineTo(buffer,bounds.right,foot.top);SelectObject(buffer,oldPen);DeleteObject(pen);
+            SetBkMode(buffer,TRANSPARENT);SetTextColor(buffer,kCream);
+            HFONT logo=CreateFontW(-22,0,0,0,FW_BOLD,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH,L"Segoe UI Variable Display");
+            auto oldFont=SelectObject(buffer,logo);RECT lr{34,12,500,44};DrawTextW(buffer,L"TEKKEN TAG TOURNAMENT 2",-1,&lr,DT_LEFT|DT_TOP|DT_NOCLIP);SelectObject(buffer,oldFont);DeleteObject(logo);
+            HFONT sub=CreateFontW(-11,0,0,0,FW_SEMIBOLD,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH,L"Segoe UI");
+            oldFont=SelectObject(buffer,sub);SetTextColor(buffer,kMuted);RECT sr{36,47,390,66};DrawTextW(buffer,L"COMMUNITY EDITION  /  SHEEDA MUSALLI",-1,&sr,DT_LEFT|DT_TOP|DT_NOCLIP);SelectObject(buffer,oldFont);DeleteObject(sub);
+            HPEN streak=CreatePen(PS_SOLID,3,kRed);HGDIOBJ oldStreak=SelectObject(buffer,streak);MoveToEx(buffer,bounds.right-142,12,nullptr);LineTo(buffer,bounds.right-70,70);SelectObject(buffer,oldStreak);DeleteObject(streak);
+            streak=CreatePen(PS_SOLID,2,kBlue);oldStreak=SelectObject(buffer,streak);MoveToEx(buffer,bounds.right-112,10,nullptr);LineTo(buffer,bounds.right-42,68);SelectObject(buffer,oldStreak);DeleteObject(streak);
+            BitBlt(target,paint.rcPaint.left,paint.rcPaint.top,paint.rcPaint.right-paint.rcPaint.left,paint.rcPaint.bottom-paint.rcPaint.top,buffer,paint.rcPaint.left,paint.rcPaint.top,SRCCOPY);
+            SelectObject(buffer,oldBitmap);
+        }
+        else FillRect(target,&paint.rcPaint,(HBRUSH)GetStockObject(BLACK_BRUSH));
+        if(bitmap)DeleteObject(bitmap);if(buffer)DeleteDC(buffer);EndPaint(hwnd,&paint);return 0;
     }
     case WM_CTLCOLORSTATIC: {
         HDC dc=(HDC)wp;HWND c=(HWND)lp;SetBkMode(dc,TRANSPARENT);
+        SetBkMode(dc,OPAQUE);SetBkColor(dc,c==g_status?kSidebar:kBg);
         if((INT_PTR)GetPropW(c,L"ttt2.muted")){SetTextColor(dc,kMuted);return (LRESULT)g_darkBrush;}
         wchar_t text[64]{};GetWindowTextW(c,text,64);
         if(c==g_status){SetTextColor(dc,kMuted);return (LRESULT)g_darkBrush;}
@@ -712,6 +777,7 @@ LRESULT CALLBACK Proc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
         if(id==ID_CONTROL_PLAYER1||id==ID_CONTROL_PLAYER2){g_capturingKey=-1;g_controlPlayer=id==ID_CONTROL_PLAYER1?0:1;g_scrollOffset=0;BuildPage();return 0;}
         if(id==ID_PLAYER2_ENABLED){g_settings.player2KeyboardEnabled=!g_settings.player2KeyboardEnabled;InvalidateRect(GetDlgItem(hwnd,id),nullptr,TRUE);return 0;}
         if((id>=ID_KEY_FIRST&&id<ID_KEY_FIRST+24)||(id>=ID_KEY2_FIRST&&id<ID_KEY2_FIRST+24)){g_controlPlayer=id>=ID_KEY2_FIRST?1:0;g_capturingKey=id-(g_controlPlayer?ID_KEY2_FIRST:ID_KEY_FIRST);SetWindowTextW(GetDlgItem(hwnd,id),L"PRESS A KEY...");SetFocus(GetDlgItem(hwnd,id));InvalidateRect(GetDlgItem(hwnd,id),nullptr,TRUE);SetWindowTextW(g_status,L"Press a key for this binding. Escape is reserved.");return 0;}
+        if(id==ID_RANKED_REGISTER){StartRankedRegistration();return 0;}
         if(id==ID_RANKED_HEALTH||id==ID_RANKED_PROFILE||id==ID_RANKED_QUEUE||id==ID_RANKED_STATUS||id==ID_RANKED_CANCEL){StartRankedRequest(id);return 0;}
         if(id==ID_BROWSE){ChooseSaveFolder();return 0;}
         if(id==ID_OPEN_SAVES){ReadControls();OpenPath(g_settings.saveRoot.empty()?LocalRoot()+L"\\saves":g_settings.saveRoot);return 0;}
@@ -729,8 +795,23 @@ LRESULT CALLBACK Proc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
     case WM_APP+6: {
         std::unique_ptr<std::wstring> result(reinterpret_cast<std::wstring*>(lp));
         if(GetDlgItem(hwnd,ID_RANKED_RESULT))SetWindowTextW(GetDlgItem(hwnd,ID_RANKED_RESULT),result->c_str());
-        for(int id:{ID_RANKED_HEALTH,ID_RANKED_PROFILE,ID_RANKED_QUEUE,ID_RANKED_STATUS,ID_RANKED_CANCEL})if(HWND h=GetDlgItem(hwnd,id))EnableWindow(h,TRUE);
-        SetWindowTextW(g_status,L"Ranked service response received");g_rankedBusy=false;return 0;
+        for(int id:{ID_RANKED_HEALTH,ID_RANKED_REGISTER,ID_RANKED_PROFILE,ID_RANKED_QUEUE,ID_RANKED_STATUS,ID_RANKED_CANCEL})if(HWND h=GetDlgItem(hwnd,id))EnableWindow(h,TRUE);
+        const bool validating=g_registrationValidation;g_registrationValidation=false;
+        SetWindowTextW(g_status,validating?(result->rfind(L"HTTP 200",0)==0?L"Token successfully generated and saved!":L"Token saved, but server validation failed."):L"Ranked service response received");g_rankedBusy=false;return 0;
+    }
+    case WM_RANKED_REGISTER_COMPLETE: {
+        std::unique_ptr<RankedRegistrationResult> result(reinterpret_cast<RankedRegistrationResult*>(lp));
+        const std::wstring token=RegistrationToken(result->response);
+        if(token.empty()){
+            if(GetDlgItem(hwnd,ID_RANKED_RESULT))SetWindowTextW(GetDlgItem(hwnd,ID_RANKED_RESULT),result->response.c_str());
+            for(int id:{ID_RANKED_HEALTH,ID_RANKED_REGISTER,ID_RANKED_PROFILE,ID_RANKED_QUEUE,ID_RANKED_STATUS,ID_RANKED_CANCEL})if(HWND h=GetDlgItem(hwnd,id))EnableWindow(h,TRUE);
+            SetWindowTextW(g_status,L"Token registration failed. Check the service status.");g_rankedBusy=false;return 0;
+        }
+        SetWindowTextW(GetDlgItem(hwnd,ID_RANKED_TOKEN),token.c_str());
+        SaveRankedSettings();
+        g_registrationValidation=true;g_rankedBusy=false;
+        StartRankedRequest(ID_RANKED_PROFILE);
+        return 0;
     }
     case WM_APP+5: if(g_gameProcess){CloseHandle(g_gameProcess);g_gameProcess=nullptr;EnableWindow(g_play,TRUE);SetWindowTextW(g_status,L"Game closed");}return 0;
     case WM_GETMINMAXINFO: {auto* m=(MINMAXINFO*)lp;m->ptMinTrackSize.x=900;m->ptMinTrackSize.y=620;return 0;}
@@ -752,7 +833,7 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int show) {
     wc.hIconSm=wc.hIcon;
     wc.hbrBackground=(HBRUSH)(COLOR_WINDOW+1);wc.lpszClassName=kWindowClass;
     if(!RegisterClassExW(&wc))return 1;
-    HWND hwnd=CreateWindowExW(0,kWindowClass,L"Tekken Tag Tournament 2 | Community Edition",WS_OVERLAPPEDWINDOW|WS_CLIPCHILDREN|WS_VSCROLL,
+    HWND hwnd=CreateWindowExW(0,kWindowClass,L"Tekken Tag Tournament 2 | Community Edition",WS_OVERLAPPEDWINDOW|WS_CLIPCHILDREN,
         CW_USEDEFAULT,CW_USEDEFAULT,1120,760,nullptr,nullptr,instance,nullptr);
     if(!hwnd)return 2;
     ShowWindow(hwnd,show);UpdateWindow(hwnd);

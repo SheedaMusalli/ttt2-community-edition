@@ -1,9 +1,76 @@
 cmake_minimum_required(VERSION 3.20)
 project(tekken_recomp CXX)
+enable_language(C)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 option(TTT2_LOCAL_SAVES "Enable the experimental persistent local save container" OFF)
+
+# Standalone verification of the rollback coordinator. This uses a synthetic deterministic
+# state fixture and does not link or alter guest session/runtime hooks.
+add_executable(ttt2_test_rollback
+    tools/test_rollback_loop.cpp
+    src/runtime/kernel/net_rollback.cpp)
+target_include_directories(ttt2_test_rollback PRIVATE src/runtime/kernel)
+add_executable(ttt2_test_netplay_input
+    tools/test_netplay_input.cpp
+    src/runtime/kernel/netplay_input.cpp)
+target_include_directories(ttt2_test_netplay_input PRIVATE src/runtime/kernel)
+add_library(ttt2_enet STATIC
+    third_party/enet/callbacks.c
+    third_party/enet/compress.c
+    third_party/enet/host.c
+    third_party/enet/list.c
+    third_party/enet/packet.c
+    third_party/enet/peer.c
+    third_party/enet/protocol.c
+    third_party/enet/win32.c)
+target_include_directories(ttt2_enet PUBLIC third_party/enet/include)
+target_compile_definitions(ttt2_enet PRIVATE ENET_BUILDING_LIB=1)
+if(WIN32)
+    target_link_libraries(ttt2_enet PUBLIC ws2_32 winmm)
+endif()
+if(WIN32)
+    add_executable(ttt2_test_xnet_route
+        tools/test_xnet_route.cpp
+        src/runtime/kernel/net_transport.cpp)
+    target_include_directories(ttt2_test_xnet_route PRIVATE src/runtime/kernel)
+    target_compile_definitions(ttt2_test_xnet_route PRIVATE _CRT_SECURE_NO_WARNINGS)
+    target_link_libraries(ttt2_test_xnet_route PRIVATE ws2_32 ttt2_enet)
+    add_executable(ttt2_test_ranked_e2e
+        tools/test_ranked_e2e.cpp
+        src/runtime/kernel/net_transport.cpp)
+    target_include_directories(ttt2_test_ranked_e2e PRIVATE src/runtime/kernel)
+    target_compile_definitions(ttt2_test_ranked_e2e PRIVATE _CRT_SECURE_NO_WARNINGS)
+    target_link_libraries(ttt2_test_ranked_e2e PRIVATE ws2_32 winhttp ttt2_enet)
+endif()
+include(CTest)
+if(BUILD_TESTING)
+    add_test(NAME rollback_loop COMMAND ttt2_test_rollback)
+    add_test(NAME netplay_input COMMAND ttt2_test_netplay_input)
+    if(WIN32)
+        add_test(NAME xnet_route COMMAND ttt2_test_xnet_route)
+        set_tests_properties(xnet_route PROPERTIES TIMEOUT 30 ENVIRONMENT "TTT2_NET=loopback")
+        find_package(Python3 COMPONENTS Interpreter REQUIRED)
+        add_test(NAME ranked_e2e COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tools/run_ranked_e2e.py" "$<TARGET_FILE:ttt2_test_ranked_e2e>")
+        set_tests_properties(ranked_e2e PROPERTIES TIMEOUT 60 ENVIRONMENT "TTT2_NET=ipv4")
+    endif()
+endif()
+if(MSVC)
+    target_compile_options(ttt2_test_rollback PRIVATE /W4 /WX)
+    target_compile_options(ttt2_test_netplay_input PRIVATE /W4 /WX)
+    if(WIN32)
+        target_compile_options(ttt2_test_xnet_route PRIVATE /W4 /WX)
+        target_compile_options(ttt2_test_ranked_e2e PRIVATE /W4 /WX)
+    endif()
+else()
+    target_compile_options(ttt2_test_rollback PRIVATE -Wall -Wextra -Werror)
+    target_compile_options(ttt2_test_netplay_input PRIVATE -Wall -Wextra -Werror)
+    if(WIN32)
+        target_compile_options(ttt2_test_xnet_route PRIVATE -Wall -Wextra -Werror)
+        target_compile_options(ttt2_test_ranked_e2e PRIVATE -Wall -Wextra -Werror)
+    endif()
+endif()
 
 # Recompiler output + XenonRecomp runtime headers (generated / third-party, not in repo).
 set(PPC_DIR      "${CMAKE_SOURCE_DIR}/../re/ppc"                       CACHE PATH "generated PPC C++")
@@ -58,7 +125,6 @@ if(TTT2_PPC_MARCH)
 endif()
 
 # XMA audio decoding: a minimal static FFmpeg (C) built from the local download of its source.
-enable_language(C)
 add_subdirectory(third_party/ffmpeg_xma)
 
 # The runtime executable: minimal host (memory, function table, entry) + kernel import stubs.
@@ -94,7 +160,7 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang" AND CMAKE_CXX_COMPILER_FRONTEND_VARIAN
     # Allow optimized renderer/runtime helpers to inline even in the Debug configuration.
     target_compile_options(tekken_recomp PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:/clang:-finline>")
 endif()
-target_link_libraries(tekken_recomp PRIVATE tekken_ppc xaudio2 ole32 winmm ttt2_ffmpeg bcrypt ws2_32)
+target_link_libraries(tekken_recomp PRIVATE tekken_ppc xaudio2 ole32 winmm ttt2_ffmpeg bcrypt ws2_32 winhttp ttt2_enet)
 # Steam online (kernel/steam_net.cpp, port/ONLINE_PLAN.md): built when the Steamworks SDK sits in
 # tools/steamworks_sdk_165 (user-supplied, not part of the repository). steam_api64.dll is
 # delay-loaded and copied next to the executable; without it (or without a running Steam
@@ -120,7 +186,7 @@ target_link_options(tekken_recomp PRIVATE "/MAP:tekken_recomp.map")
 
 # --- Version, icon -------------------------------------------------------------------------
 # One version for the game executable's VERSIONINFO, the installer and Add or remove programs.
-set(TTT2_VERSION "2.0.0")
+set(TTT2_VERSION "2.1.0")
 string(REPLACE "." "," TTT2_VERSION_COMMAS "${TTT2_VERSION},0")
 # Original TTT2 Community Edition mark, shared by the installer and installed game executable.
 set(TTT2_SETUP_ICON "${CMAKE_SOURCE_DIR}/src/setup/ttt2.ico")
@@ -142,7 +208,7 @@ set(TTT2_LAUNCHER_EXE "${TTT2_PAYLOAD_DIR}/TTT2 Launcher.exe")
 configure_file(src/launcher/launcher.rc.in "${CMAKE_BINARY_DIR}/launcher.rc" @ONLY)
 set_source_files_properties("${CMAKE_BINARY_DIR}/launcher.rc" PROPERTIES OBJECT_DEPENDS "${TTT2_SETUP_ICON}")
 add_executable(ttt2_launcher WIN32 src/launcher/launcher.cpp "${CMAKE_BINARY_DIR}/launcher.rc")
-target_link_libraries(ttt2_launcher PRIVATE comctl32 shell32 ole32 uxtheme dwmapi winhttp crypt32)
+target_link_libraries(ttt2_launcher PRIVATE comctl32 shell32 ole32 uxtheme dwmapi winhttp crypt32 bcrypt)
 target_compile_definitions(ttt2_launcher PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
     TTT2_VERSION_STR="${TTT2_VERSION}")
 if(MSVC)

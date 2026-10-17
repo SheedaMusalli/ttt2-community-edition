@@ -45,6 +45,34 @@ The health endpoint is `https://YOUR_DOMAIN/healthz`; it should return
 `{"status":"ok"}`. The matchmaking endpoints are under `/v1/` and require a
 player bearer token.
 
+New account registration is disabled on this public service by default. To let
+players generate accounts from the launcher, set `TTT2_RANKED_ALLOW_REGISTRATION=1`
+in the VPS `.env` file, then recreate the service with `docker compose ... up -d`.
+The `/v1/register` endpoint accepts a player ID and returns a bearer token once;
+the launcher stores it encrypted for the current Windows account. The service
+limits registrations to five attempts per source IP per hour per process. The
+provided private Compose deployment trusts the Caddy-set `X-Forwarded-For` header
+for this limit; only enable `TTT2_RANKED_TRUST_PROXY=1` behind a proxy that strips
+client-supplied forwarding headers. This is a basic guardrail, not production abuse protection; keep registration disabled
+until you are prepared to operate it and monitor signups. Use the HTTPS URL in the
+launcher for any remote service.
+
+For signaling-contract tests, a queue request may include a client-advertised UDP
+endpoint, for example:
+
+```json
+{"build":"ttt2-community","region":"global","listen_endpoint":"1.2.3.4:28100"}
+```
+
+When paired, each participant's reservation response includes its role (`host` or
+`guest`), the other participant's `opponent_endpoint`, and a shared random
+`session_key_bytes` value encoded as 32 hexadecimal characters (16 bytes). The
+endpoint is client-supplied and only syntax-checked; the service does not verify
+that it is publicly reachable or mapped by a router. This is signaling metadata
+only. The current game runtime does not consume it, and the key is not used for
+encryption until a reviewed runtime protocol does so. Do not expose this service
+as a working public P2P game service based on these fields alone.
+
 ## Create player accounts
 
 Provision each unique player ID from the VPS. The command prints that player's
@@ -57,8 +85,8 @@ docker compose --env-file .env -f deploy/compose.yml run --rm ranked provision b
 ```
 
 The returned credentials are long-lived in this prototype and there is no
-self-service password reset or token rotation. To add another account, use a new
-ID. Protect SSH access to the host and keep `.env` private.
+self-service password reset or token rotation. To add an account as an operator,
+use a new ID. Protect SSH access to the host and keep `.env` private.
 
 ## Operate and stop
 
@@ -74,8 +102,9 @@ verification rather than expecting public HTTPS.
 
 ## Current service limits
 
-The HTTP server uses Python's standard library and SQLite. It has no account
-registration, administrator web console, distributed rate limiting, multi-region
+The HTTP server uses Python's standard library and SQLite. Optional account
+registration has only in-process per-IP limits; there is no administrator web console,
+distributed rate limiting, multi-region
 queue, server-verified gameplay, or public relay. Do not treat client-reported
 results as trustworthy tournament outcomes. For a public competitive service,
 add abuse controls and operational monitoring, then validate the real game

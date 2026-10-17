@@ -136,6 +136,24 @@ class RankedTests(unittest.TestCase):
         self.assertEqual(alice['match_token'], reserved['match_token'])
         self.assertGreaterEqual(len(alice['match_token']), 32)
 
+    def test_reservation_exchanges_endpoints_roles_and_session_key(self):
+        self.call('alice', 'queue', build='v1', region='asia', listen_endpoint='127.0.0.1:28100')
+        guest = self.call('bob', 'queue', build='v1', region='asia', listen_endpoint='127.0.0.1:28101')
+        host = self.call('alice', 'status')
+        self.assertEqual(host['role'], 'host')
+        self.assertEqual(guest['role'], 'guest')
+        self.assertEqual(host['opponent_endpoint'], '127.0.0.1:28101')
+        self.assertEqual(guest['opponent_endpoint'], '127.0.0.1:28100')
+        self.assertEqual(host['id'], guest['id'])
+        self.assertEqual(host['match_token'], guest['match_token'])
+        self.assertEqual(host['session_key_bytes'], guest['session_key_bytes'])
+        self.assertEqual(len(bytes.fromhex(host['session_key_bytes'])), 16)
+
+    def test_invalid_listen_endpoint_rejected(self):
+        for endpoint in ('localhost:28100', '127.0.0.1:0', '127.0.0.1:65536', '224.0.0.1:9000', '[::1]:9000'):
+            with self.subTest(endpoint=endpoint), self.assertRaises(Rejected):
+                self.call('alice', 'queue', build='v1', region='asia', listen_endpoint=endpoint)
+
     def test_concurrent_queue_reserves_once(self):
         with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
             results = list(pool.map(lambda p: self.call(p, 'queue', build='v1', region='asia'), self.tokens))
@@ -179,6 +197,48 @@ class RankedTests(unittest.TestCase):
             with urllib.request.urlopen(f'http://127.0.0.1:{server.server_port}/healthz', timeout=3) as response:
                 self.assertEqual(response.status, 200)
                 self.assertEqual(json.load(response), {'status': 'ok'})
+        finally:
+            server.shutdown()
+            thread.join()
+            server.server_close()
+
+    def test_http_self_registration_and_token_authentication(self):
+        server = make_server(self.store, 0)
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        try:
+            url = f'http://127.0.0.1:{server.server_port}/v1/register'
+            request = urllib.request.Request(url, data=json.dumps({'player': 'new_player'}).encode(),
+                                             headers={'Content-Type': 'application/json'})
+            with urllib.request.urlopen(request, timeout=3) as response:
+                self.assertEqual(response.status, 201)
+                account = json.load(response)
+            self.assertEqual(account['id'], 'new_player')
+            self.assertGreaterEqual(len(account['token']), 32)
+            profile = urllib.request.Request(f'http://127.0.0.1:{server.server_port}/v1/profile',
+                data=b'{}', headers={'Authorization': 'Bearer ' + account['token']})
+            with urllib.request.urlopen(profile, timeout=3) as response:
+                self.assertEqual(json.load(response)['rating'], 1000)
+            duplicate = urllib.request.Request(url, data=json.dumps({'player': 'new_player'}).encode(),
+                                               headers={'Content-Type': 'application/json'})
+            with self.assertRaises(urllib.error.HTTPError) as error:
+                urllib.request.urlopen(duplicate, timeout=3)
+            self.assertEqual(error.exception.code, 409)
+        finally:
+            server.shutdown()
+            thread.join()
+            server.server_close()
+
+    def test_http_self_registration_can_be_disabled(self):
+        server = make_server(self.store, 0, allow_registration=False)
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        try:
+            request = urllib.request.Request(f'http://127.0.0.1:{server.server_port}/v1/register',
+                data=b'{"player":"blocked"}', headers={'Content-Type': 'application/json'})
+            with self.assertRaises(urllib.error.HTTPError) as error:
+                urllib.request.urlopen(request, timeout=3)
+            self.assertEqual(error.exception.code, 403)
         finally:
             server.shutdown()
             thread.join()

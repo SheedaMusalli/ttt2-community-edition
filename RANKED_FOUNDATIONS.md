@@ -68,9 +68,10 @@ python port/tools/ranked_service.py --db ranked.sqlite3 serve
 ```
 
 Provision prints each token once; save it privately. Duplicate player IDs are rejected.
-There is no public registration endpoint. For local development the server binds to
-`127.0.0.1:8765`; `serve --host` and `serve --port` (also configurable through
-`TTT2_RANKED_HOST` and `TTT2_RANKED_PORT`) allow container/server binding. Database
+The v2.1 self-registration endpoint is enabled by default only for loopback-bound
+servers; remote binds require `TTT2_RANKED_ALLOW_REGISTRATION=1`. For local development
+the server binds to `127.0.0.1:8765`; `serve --host` and `serve --port` (also configurable
+through `TTT2_RANKED_HOST` and `TTT2_RANKED_PORT`) allow container/server binding. Database
 files are ignored by Git. Stop with Ctrl+C. No service is left running by tests.
 
 Every endpoint uses POST, JSON, and `Authorization: Bearer <player-token>`:
@@ -85,6 +86,7 @@ Every endpoint uses POST, JSON, and `Authorization: Bearer <player-token>`:
 | `/v1/ready` | `{"match_id":"..."}` | Mark ready; both participants activate the match |
 | `/v1/report` | `{"match_id":"...","winner":"alice"}` | Participant ID or `draw`; immutable, retry-safe |
 | `/v1/abort` | `{"match_id":"..."}` | End reservation/active match without rating change |
+| `/v1/register` | `{"player":"player_name"}` | Create account and return bearer token (loopback by default; remote opt-in) |
 
 Queue again every ~10 seconds while searching. Poll status to receive a reservation;
 retain the match ID to inspect the final result. Build names are client-declared in this
@@ -160,6 +162,48 @@ clients, concurrent queue reservation, persistence after reopening, repeated rep
 disputes, heartbeat-based forfeits, stale-match expiry, aborts/draws and malformed/oversize
 requests. Initial testing exposed an unclosed SQLite connection on Windows; it was fixed.
 
+### Rollback coordinator prototype
+
+Added `port/src/runtime/kernel/net_rollback.{h,cpp}` and the standalone
+`ttt2_test_rollback` CMake target. The coordinator has a 2–10 frame snapshot ring, bounded
+local input delay (0–8 frames), previous-input prediction, late-input correction and replay,
+snapshot checksums, and rejects conflicting duplicate inputs. The synthetic test compares the
+replayed state byte-for-byte with a linear simulation and also checks delayed input and snapshot
+metadata. Build and run it with:
+
+```powershell
+cmake -S port -B port/build-rollback-vs -G "Visual Studio 17 2022" -A x64
+cmake --build port/build-rollback-vs --target ttt2_test_rollback --config Release
+ctest --test-dir port/build-rollback-vs -C Release -R rollback_loop --output-on-failure
+```
+
+Validated on this host using MSVC v143: target compiled with `/W4 /WX` and printed
+`PASS: rollback loop, prediction, bounded snapshots, checksum, and input delay`; CTest passed.
+This is a coordinator fixture only. No live game rollback is enabled. The runtime does not yet
+expose a verified deterministic snapshot boundary or a single-threaded replayable game-step
+callback: guest execution and GPU/vblank/interrupt work span runtime threads, and the full guest
+address space contains non-simulation state. Capturing/restoring guessed ranges or replaying the
+existing interrupt path could corrupt the game or duplicate side effects. Therefore no calls were
+added to `xsession.cpp`, `xlive.cpp`, or the guest frame path. Online session discovery and packet
+transport remain separate from this rollback prototype; RTT/ping and rollback HUD telemetry are
+not wired. The next integration step requires identifying simulation-owned mutable memory and
+separating deterministic logic ticks from rendering, audio, host callbacks and asynchronous I/O,
+then validating that boundary against captured local runs.
+
+### Synchronized input timeline prototype
+
+Added `port/src/runtime/kernel/netplay_input.{h,cpp}` and the standalone
+`ttt2_test_netplay_input` CMake/CTest target. It encodes versioned controller samples with frame
+IDs, assigns the local input delay, bounds input history, and exposes a nonblocking gate that
+returns a frame only after both local and remote samples exist. MSVC v143 built the target with
+`/W4 /WX`; its packet, timing, stale-input and gate checks pass. This is not connected to game
+input or a live peer: `XamInputGetState` has no frame ID, the 60 Hz vblank callback is not proven
+to be the game's once-per-frame simulation step, and the transport receiver is currently owned
+by the virtual socket layer. Blocking either path or treating guest user 1 as the network
+opponent without confirming the title's online input flow could deadlock the game or misroute
+controls. No `xsession.cpp` or `xlive.cpp` hook was added. See
+[`NETPLAY_INPUT_PHASE1.md`](NETPLAY_INPUT_PHASE1.md) for the boundary audit and memory inventory.
+
 Visual Studio Build Tools 2022 with the v143 toolset is installed. `test_online_policy.cpp`
 was compiled with MSVC `/std:c++20` and executed successfully, covering rejection of 480,
 malformed values and overflow, and acceptance of a valid decimal AppID. The hardcoded
@@ -178,7 +222,7 @@ Remaining implementation milestones:
    for unimplemented service operations.
 3. Implement authenticated packet transport and relays/NAT handling. Test reliable
    ordering, packet loss, jitter, reconnect, timeouts, desync detection and guest timing.
-   This task did not implement rollback or prove deterministic simulation.
+   The new coordinator test does not prove deterministic game-state simulation or enable rollback.
 4. Replace the local HTTP harness for public use: TLS, account verification/token
    rotation, rate limits, bounded workers, operational monitoring, database migrations,
    backups/retention and abuse controls. The current single-process HTTPServer and
@@ -253,3 +297,72 @@ standalone build byte for byte. A screenshot review found that the Online page's
 and explanatory note overlapped the fixed footer, and the persistent footer hint collided with
 the live status line. The response box is now shorter, both redundant notes are removed, and the
 footer status has clear space.
+
+### XNet peer socket route verification (2026-10-17)
+
+Audited `xsession.cpp`, `xlive.cpp`, `xsocket.cpp`, `matchmaking.cpp` and `net_transport.cpp`. The socket shim maps XNet virtual addresses to transport peer IDs, sends game datagrams through `net::Send`, and queues received datagrams for `NetDll_recvfrom` and `select`. This is a host-side implementation; guest ABI behavior still requires validation against a generated game build.
+
+### Ranked endpoint signaling and ENet adapter (2026-10-17)
+
+The ranked service accepts an optional syntax-checked IPv4 `listen_endpoint`. Paired clients receive roles, the opponent's advertised endpoint, and a shared random 16-byte session key. The endpoint remains a client claim and does not prove reachability, NAT traversal, or peer identity.
+
+`net_transport.cpp` uses vendored ENet for numeric IPv4 peers, with sequenced-unreliable input and reliable ordered control channels. The runtime adapter is opt-in through `TTT2_RANKED_RUNTIME=1` and requires `TTT2_RANKED_SERVICE`, `TTT2_RANKED_TOKEN`, `TTT2_RANKED_PLAYER`, and for remote play a reachable `TTT2_RANKED_ADVERTISE_IP`. It registers the reservation endpoint and copies match/peer/session values into the host's current `XSESSION_INFO` representation. No Steamworks SDK, Spacewar identity, relay, public address discovery, or production matchmaking security is enabled. The guest session ABI and in-game flow remain unverified, so this is not a claim of playable online ranked mode.
+
+### Native build and test results (2026-10-17)
+
+Using the existing Visual Studio 2022 Build Tools CMake/Ninja/Clang-CL and v143 SDK, `tekken_recomp.exe`, `ttt2_setup.exe`, `ttt2_setup_probe.exe`, `ttt2_test_ranked_e2e.exe`, and `ttt2_test_xnet_route.exe` were built. CMake needed `VSINSTALLDIR` set to the Build Tools root so it could locate the CRT payload. The first compile found and fixed a Clang-CL string-copy error in `ranked_adapter.cpp` and a string concatenation error in the E2E test.
+
+The Python ranked-service suite passes all 16 tests. CTest `ranked_e2e` passes: two local processes acquire a reservation over HTTP, authenticate with ENet and exchange bidirectional messages. CTest `xnet_route` builds but fails at the child-process shutdown assertion: the server process does not exit before the harness timeout. That shutdown issue remains open. Successful compilation and the isolated E2E test do not prove a live game match works.
+
+The installer includes the rebuilt host game runtime and launcher resources, but still requires a user's legally obtained disc image and Title Update 3 to create installed game data.
+
+Build commands used:
+
+```powershell
+$env:VSINSTALLDIR = 'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools'
+cmake -S port -B port\build-latency
+cmake --build port\build-latency --target tekken_recomp
+cmake --build port\build-latency --target ttt2_setup ttt2_setup_probe
+cmake --build port\build-latency --target ttt2_test_ranked_e2e ttt2_test_xnet_route
+ctest --test-dir port\build-latency --output-on-failure -R "ranked_e2e"
+```
+
+### v2.1 launcher, registration, and package (2026-10-17)
+
+The launcher now uses a memory-DC paint pass for its main window, suppresses the
+native vertical scrollbar, forwards mouse-wheel input from child controls, and keeps
+the fixed status/action footer outside the page viewport. Combo-box page layout uses
+the control's collapsed height rather than its expanded drop-down height. Display
+and performance settings were compacted; input polling is shown in a dedicated
+section. Tall pages retain wheel-based scrolling and hide controls that would
+otherwise cover the footer. This code compiles, but pixel-level review across DPI
+scales and window sizes remains outstanding.
+
+The Online page's **Generate Token** action creates a random suffix for the local
+Windows username, POSTs to `/v1/register`, stores the returned bearer token through
+the existing per-user DPAPI settings path, and validates it with `/v1/profile`.
+The service rejects duplicate IDs, limits each source IP to five registrations per
+hour in one process, and returns 403 when registration is disabled. The supplied
+Compose deployment enables forwarded-address parsing only behind its private Caddy
+proxy. Loopback-bound services allow registration by default; non-loopback services require the explicit
+`TTT2_RANKED_ALLOW_REGISTRATION=1` setting. This in-memory limit is not distributed
+abuse protection; public deployment still needs operational safeguards.
+
+Validation on this host: `python -m unittest discover -s port/tools -p
+test_ranked_service.py -v` passes 18 tests. CMake configured with Visual Studio 2022
+Build Tools, Clang-CL and v143 libraries; the Release `ttt2_setup` target compiled
+successfully after correcting a Win32 `LONG`/C++ integer mismatch in the paint code.
+The setup embeds the matching launcher and locally generated game runtime. These
+game-derived executables remain local artifacts and are not added to Git. The
+installer can process a legally obtained disc image and TU3 locally.
+
+The v2.1 source documentation records the launcher repaint/layout changes, token
+automation and networking boundary. Guest ABI and in-game session behavior remain
+unverified; standalone service and transport tests do not establish playable online
+ranked matches.
+
+The full CTest suite was also rerun after the v2.1 build: `rollback_loop`,
+`netplay_input`, and `ranked_e2e` pass. `xnet_route` still fails consistently at its
+child-process completion stage (`server exit 4` after 10 seconds); the harness does
+not complete the expected socket datagram round-trip, so XNet route integration is
+not validated and remains an open blocker.

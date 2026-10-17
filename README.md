@@ -22,7 +22,39 @@ The game loop currently runs at approximately 60 simulation updates per second. 
 
 ## Install and play
 
-Use 64-bit Windows 10 or 11, a Direct3D 11-capable graphics device, and about 13 GB of free space. You must provide a legally obtained Xbox 360 disc image and Title Update 3. The installer processes those inputs locally and installs the launcher beside the runtime. The launcher can configure settings, open the save folder or log, and start the game.
+Use 64-bit Windows 10 or 11, a Direct3D 11-capable graphics device, and about 13 GB of free space. The installer needs an Xbox 360 disc image that you are legally entitled to use, plus Title Update 3 (TU3), available as a separate asset on the [Releases page](https://github.com/SheedaMusalli/ttt2-community-edition/releases/latest). This repository does not provide a game ISO download. The installer processes the supplied files locally; it does not download or include the game image.
+
+### Installation steps
+
+1. Download the latest `ttt2_setup.exe` installer from [Releases](https://github.com/SheedaMusalli/ttt2-community-edition/releases/latest).
+2. Download the TU3 asset from that same release. Keep the original asset filename if possible.
+3. Prepare your legally obtained Xbox 360 *Tekken Tag Tournament 2* disc image (`.iso`). Do not rename the TU3 package to `.iso` or select it as the disc image.
+4. Run `ttt2_setup.exe`. If Windows asks for administrator access, review the publisher and prompt before continuing; these community builds are unsigned.
+5. In the installer, browse to the game ISO, browse to the TU3 package (or a folder containing the correct TU3 package), and choose an installation folder with about 13 GB of available space.
+6. Start installation and allow the installer to verify the base game and update, build the installed game files locally, and copy the launcher and runtime into the selected folder.
+7. When installation completes, start **TTT2 Launcher** from the created shortcut or the installation folder. Use **Check install** if the launcher reports that required files are missing, then choose **Launch Game**.
+8. On the first game launch, create the game's save data when prompted. The default save location is under `%LOCALAPPDATA%\TTT2Recomp\saves`; you can change the location and manage backups in the launcher.
+
+The installer accepts the retail ISO layouts documented in [port/INSTALLER.md](port/INSTALLER.md) and checks that the selected update is TU3. Installation failures or cancellations remove files written by that incomplete install. The launcher, game settings, logs, shader cache, and saves are kept in their documented local locations.
+
+### Recommended starting settings
+
+These are general baseline settings for a first run. They are not a benchmarked best configuration for every PC, and they cannot guarantee a fixed frame rate across every stage.
+
+| Launcher option | Starting point | When to adjust |
+|---|---|---|
+| Renderer | **Direct3D 11 hardware renderer: On** | Turn it off only to diagnose graphics compatibility problems; this selects the slower software fallback. |
+| Window mode | **Borderless** | Choose Fullscreen or Windowed to suit your display and capture setup. |
+| Output resolution | **Your display's native resolution** | Lower it if you prefer reduced rendering load; this does not change the game's approximately 60 Hz simulation cadence. |
+| Internal render scale | **Auto (follows resolution)** | Use 1.0x as a fixed baseline. Higher scales render more pixels and can increase GPU load. |
+| Compile new shaders in the background | **On** | Turn off for troubleshooting if a shader or effect appears late or incorrectly. |
+| Prepare saved shaders while the game starts | **On** | This warms previously cached variants; newly encountered shaders can still compile during play. |
+| Fast shader compilation during a match | **On** | Turn off to prioritize compatibility if shader results appear incorrect. |
+| Input polling | **500 Hz** | Use 250 Hz to reduce polling work or 750/1000 Hz for more frequent sampling if the system has CPU headroom. Higher rates do not change the game's simulation rate. |
+| Performance overlay | **FPS and frame-time graph** | Temporarily enable CPU, GPU, memory, or temperature fields while diagnosing performance. Temperature fields depend on available Windows sensor readings. |
+| Player 2 keyboard | **Off unless playing local two-player** | Enable it in Controls to use a second, independently configurable keyboard layout. |
+
+For troubleshooting, first keep the hardware renderer on, use Auto or 1.0x render scale, and watch the frame-time graph while testing the same scene. Change one setting at a time so you can tell whether it helped. Shader warm-up only prepares cached variants and is not a complete precompile of every shader in the game.
 
 The installer and runtime are unsigned community builds. Review the source and build locally if you do not want to run binaries from another person. Do not redistribute game-derived files unless you have confirmed the necessary rights.
 

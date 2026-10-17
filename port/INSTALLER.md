@@ -54,8 +54,11 @@ the Common Controls v6 dependency. /MT: the installer itself needs no redist.
 Version: `TTT2_VERSION` in CMakeLists (VERSIONINFO, Add or remove programs).
 
 The installed launcher includes a controller and keyboard input polling selector under
-**Performance → Controller Input Polling**. It supports 250, 500, 750, and 1000 Hz, saves the
-choice to `%LOCALAPPDATA%\TTT2Recomp\launcher.ini`, and applies it the next time the game starts.
+**Performance → Controller Input Polling**. It supports 250, 500, 750, 1000, 2000, 4000, and
+8000 Hz, saves the choice to `%LOCALAPPDATA%\TTT2Recomp\launcher.ini`, and applies it the next
+time the game starts. Rates above 1000 Hz use a high-resolution Windows waitable timer when
+available and a deadline-spin fallback otherwise; these modes can consume substantial CPU and
+cannot guarantee exact intervals under every Windows scheduler or device driver.
 The launcher also lets players choose overlay metrics under **Advanced → Performance Overlay**.
 The overlay reports presentation rate, recent per-frame timing, CPU/GPU utilization, RAM and GPU
 memory. CPU/GPU temperature entries depend on a Windows sensor source and can display unavailable.

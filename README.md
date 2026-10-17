@@ -4,7 +4,7 @@ An unofficial Windows community project for running *Tekken Tag Tournament 2* th
 
 ## Current features
 
-- **Launcher settings:** Configure display mode, output resolution, render scale, input polling (250, 500, 750, or 1000 Hz), save location, and shader options. The launcher repaints its window through a buffered paint pass, keeps the footer fixed, hides the native scrollbar, and supports mouse-wheel scrolling when a small or high-DPI window needs more room.
+- **Launcher settings:** Configure display mode, output resolution, render scale, input polling (250, 500, 750, 1000, 2000, 4000, or 8000 Hz), save location, and shader options. The launcher repaints its window through a buffered paint pass, keeps the footer fixed, hides the native scrollbar, and supports mouse-wheel scrolling when a small or high-DPI window needs more room.
 - **Keyboard controls:** Click a binding and press a key to assign it. Player 1 and Player 2 each have D-pad, face, shoulder, Start/Back, LS click, RS click, and LS/RS directional bindings. The in-game keyboard setup reads and edits Player 1's saved bindings.
 - **Local two-player keyboard play:** Enable **Player 2 keyboard** in Controls to publish a separate second keyboard pad alongside Player 1. Player 2 has its own default layout and can be rebound independently. A physical controller remains supported. Spacebar has no hidden Start/menu action; bind it explicitly if desired.
 - **Performance overlay:** Choose FPS, frame-time graph, CPU/GPU utilization, system and process memory, GPU memory, and CPU/GPU temperature metrics. Temperature readings can be unavailable when Windows or the hardware does not expose a supported sensor.
@@ -50,7 +50,7 @@ These are general baseline settings for a first run. They are not a benchmarked 
 | Compile new shaders in the background | **On** | Turn off for troubleshooting if a shader or effect appears late or incorrectly. |
 | Prepare saved shaders while the game starts | **On** | This warms previously cached variants; newly encountered shaders can still compile during play. |
 | Fast shader compilation during a match | **On** | Turn off to prioritize compatibility if shader results appear incorrect. |
-| Input polling | **500 Hz** | Use 250 Hz to reduce polling work or 750/1000 Hz for more frequent sampling if the system has CPU headroom. Higher rates do not change the game's simulation rate. |
+| Input polling | **500 Hz** | Use 250 Hz to reduce polling work or 750/1000 Hz for more frequent sampling. 2000/4000/8000 Hz are available for experimentation but add substantial CPU work and may not be sustained consistently under Windows scheduling. Higher rates do not change the game's simulation rate. |
 | Performance overlay | **FPS and frame-time graph** | Temporarily enable CPU, GPU, memory, or temperature fields while diagnosing performance. Temperature fields depend on available Windows sensor readings. |
 | Player 2 keyboard | **Off unless playing local two-player** | Enable it in Controls to use a second, independently configurable keyboard layout. |
 

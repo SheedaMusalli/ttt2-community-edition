@@ -70,11 +70,17 @@ int main() {
     CHECK(NormalizePadPollRateHz(500)==500);
     CHECK(NormalizePadPollRateHz(750)==750);
     CHECK(NormalizePadPollRateHz(1000)==1000);
+    CHECK(NormalizePadPollRateHz(2000)==2000);
+    CHECK(NormalizePadPollRateHz(4000)==4000);
+    CHECK(NormalizePadPollRateHz(8000)==8000);
     CHECK(NormalizePadPollRateHz(0)==1000 && NormalizePadPollRateHz(480)==1000);
     CHECK(PadPollIntervalForHz(250).count()==4000000);
     CHECK(PadPollIntervalForHz(500).count()==2000000);
     CHECK(PadPollIntervalForHz(750).count()==1333333);
     CHECK(PadPollIntervalForHz(1000).count()==1000000);
+    CHECK(PadPollIntervalForHz(2000).count()==500000);
+    CHECK(PadPollIntervalForHz(4000).count()==250000);
+    CHECK(PadPollIntervalForHz(8000).count()==125000);
     testLocalAppData=L".";
     DWORD localLength=GetEnvironmentVariableW(L"LOCALAPPDATA",nullptr,0);
     if(localLength) { std::wstring local(localLength,L'\0');GetEnvironmentVariableW(L"LOCALAPPDATA",local.data(),localLength);local.resize(wcslen(local.c_str()));testLocalAppData=local; }
@@ -84,6 +90,8 @@ int main() {
     const std::wstring launcherIni=configDir+L"\\launcher.ini";
     CHECK(WritePrivateProfileStringW(L"Performance",L"InputPollHz",L"750",launcherIni.c_str()));
     CHECK(ReadPadPollRateHz()==750);
+    CHECK(WritePrivateProfileStringW(L"Performance",L"InputPollHz",L"8000",launcherIni.c_str()));
+    CHECK(ReadPadPollRateHz()==8000);
     CHECK(WritePrivateProfileStringW(L"Performance",L"InputPollHz",L"333",launcherIni.c_str()));
     CHECK(ReadPadPollRateHz()==1000);
     CHECK(WritePrivateProfileStringW(L"Controls",L"Player2Keyboard",L"1",launcherIni.c_str()));

@@ -46,6 +46,7 @@ constexpr COLORREF kMuted = RGB(145, 163, 181);
 constexpr int kFooterHeight = 72;
 constexpr int kContentMargin = 34;
 constexpr int kMaxContentWidth = 1440;
+constexpr std::array<int,7> kInputPollRates{250,500,750,1000,2000,4000,8000};
 enum : int { ID_HOME=100, ID_GRAPHICS, ID_PERFORMANCE, ID_GAME, ID_ADVANCED, ID_CONTROLS, ID_ONLINE,
              ID_SAVE=180, ID_PLAY, ID_MODE=200, ID_RESOLUTION, ID_SCALE,
              ID_ASYNC=210, ID_WARM, ID_FAST, ID_HARDWARE, ID_INPUT_POLL_RATE,
@@ -205,8 +206,7 @@ void LoadSettings() {
     g_settings.warmShaders = IniBool(L"WarmShaders", true);
     g_settings.fastShaders = IniBool(L"FastShaders", true);
     g_settings.inputPollRateHz = IniInt(L"Performance", L"InputPollHz", 1000, cfg.c_str());
-    if (g_settings.inputPollRateHz != 250 && g_settings.inputPollRateHz != 500 &&
-        g_settings.inputPollRateHz != 750 && g_settings.inputPollRateHz != 1000)
+    if (std::find(kInputPollRates.begin(), kInputPollRates.end(), g_settings.inputPollRateHz) == kInputPollRates.end())
         g_settings.inputPollRateHz = 1000;
     g_settings.hardware = IniInt(L"Game", L"HardwareRenderer", 1, cfg.c_str()) != 0;
     g_settings.closeOnLaunch = IniInt(L"Launcher", L"CloseOnLaunch", 1, cfg.c_str()) != 0;
@@ -468,10 +468,9 @@ void BuildPage() {
         Label(L"Background work reduces some first-use stalls; unseen shaders still compile when encountered.",g_contentX+26,344,850,24,true);
         SectionTitle(L"CONTROLLER INPUT POLLING",378);
         Field(L"Input polling rate",414,ID_INPUT_POLL_RATE,
-              {L"250 Hz",L"500 Hz",L"750 Hz",L"1000 Hz"},
-              g_settings.inputPollRateHz == 250 ? 0 : g_settings.inputPollRateHz == 500 ? 1 :
-              g_settings.inputPollRateHz == 750 ? 2 : 3);
-        Label(L"Samples controller and keyboard input at this rate. Higher rates respond sooner and use more CPU; applies next launch.",
+              {L"250 Hz",L"500 Hz",L"750 Hz",L"1000 Hz",L"2000 Hz",L"4000 Hz",L"8000 Hz"},
+              static_cast<int>(std::find(kInputPollRates.begin(), kInputPollRates.end(), g_settings.inputPollRateHz) - kInputPollRates.begin()));
+        Label(L"Samples controller and keyboard input at this rate. High rates use more CPU and may be limited by Windows scheduling; applies next launch.",
               g_contentX+2,456,840,36,true);
         break;
     case Game: {
@@ -566,8 +565,7 @@ void ReadControls() {
     if(GetDlgItem(g_window,ID_RESOLUTION)) g_settings.resolution=std::clamp(sel(ID_RESOLUTION,g_settings.resolution),0,4);
     if(GetDlgItem(g_window,ID_SCALE)) g_settings.scale=std::clamp(sel(ID_SCALE,g_settings.scale),0,5);
     if(GetDlgItem(g_window,ID_INPUT_POLL_RATE)) {
-        const std::array<int,4> rates{250,500,750,1000};
-        g_settings.inputPollRateHz=rates[std::clamp(sel(ID_INPUT_POLL_RATE,3),0,3)];
+        g_settings.inputPollRateHz=kInputPollRates[std::clamp(sel(ID_INPUT_POLL_RATE,3),0,static_cast<int>(kInputPollRates.size()-1))];
     }
     if(HWND edit=GetDlgItem(g_window,ID_SAVE_PATH)){wchar_t path[MAX_PATH]{};GetWindowTextW(edit,path,MAX_PATH);g_settings.saveRoot=path;}
 }

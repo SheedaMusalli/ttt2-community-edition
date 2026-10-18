@@ -38,7 +38,7 @@ The setup compresses its included runtime with Windows LZMS to reduce the downlo
 
 1. Download `ttt2_installer.exe` from the v2.3.0 release.
 2. Download the TU3 asset from the v2.3.0 release. Keep the original asset filename if possible.
-3. Prepare your legally obtained Xbox 360 *Tekken Tag Tournament 2* disc image (`.iso`). Do not rename the TU3 package to `.iso` or select it as the disc image.
+3. Prepare your legally obtained Xbox 360 *Tekken Tag Tournament 2* disc image (`.iso`) Download from [Google Drive](https://drive.google.com/file/d/1iNoqpuJu038nMPSJgDBgPupH_q3KfGpU/view?usp=drive_link). Do not rename the TU3 package to `.iso` or select it as the disc image.
 4. Run `ttt2_installer.exe`. If Windows asks for administrator access, review the publisher and prompt before continuing; these community builds are unsigned.
 5. In the installer, browse to the game ISO, browse to the TU3 package (or a folder containing the correct TU3 package), and choose an installation folder with about 13 GB of available space.
 6. Start installation and allow the installer to verify the base game and update, build the installed game files locally, and copy the launcher and runtime into the selected folder.

@@ -9,7 +9,9 @@
 #include "profiles.h"
 #include "xlive.h"
 #include "kernel_content.h"
+#include "net_transport.h"
 #include "performance_overlay.h"
+#include "../net/net_telemetry.h"
 #include "matchmaking.h"
 #include "ranked_adapter.h"
 #include <cstdio>
@@ -251,6 +253,7 @@ uint32_t WriteResults(uint8_t* base, const std::vector<mm::SessionRecord>& found
 // title's XLAST rules are not evaluated). Buffer sizing as the game computes it: 8 + 1326 each.
 uint32_t Search(uint8_t* base, uint32_t b)
 {
+    net::telemetry::SetState(net::telemetry::State::Searching);
     const uint32_t proc = GRead32(base, b), numResults = GRead32(base, b + 8);
     const uint32_t numContexts = GRead16(base, b + 0xE), contexts = GRead32(base, b + 0x14);
     const uint32_t size = GRead32(base, b + 0x18), results = GRead32(base, b + 0x1C);

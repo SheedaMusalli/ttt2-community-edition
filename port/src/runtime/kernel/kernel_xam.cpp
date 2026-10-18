@@ -85,6 +85,20 @@ PPC_FUNC(__imp__XamGetSystemVersion)
 // (title_server.cpp); its online XUID is stable and distinct from the offline one, because
 // the profile monitor sub_82B37080 compares both every poll. ---
 static bool User0SignedIn() { return profiles::SignedIn(); }
+static std::atomic<bool> g_user1DeviceConnected{false};
+static std::atomic<bool> g_user1PhysicalConnected{false};
+static bool User1DeviceSignedIn()
+{
+    if (g_user1DeviceConnected.load(std::memory_order_relaxed)) return true;
+    wchar_t localAppData[MAX_PATH]{};
+    const DWORD length = GetEnvironmentVariableW(L"LOCALAPPDATA", localAppData, MAX_PATH);
+    if (!length || length >= MAX_PATH) return false;
+    std::wstring path(localAppData);
+    path += L"\\TTT2Recomp\\launcher.ini";
+    return GetPrivateProfileIntW(L"Controls", L"Player2Keyboard", 0, path.c_str()) != 0;
+}
+static constexpr uint64_t kKeyboardPlayerXuid = 0x4B4559424F415244ull; // "KEYBOARD"
+static constexpr uint64_t kControllerPlayerXuid = 0x5041440000000002ull; // local Player 2 controller
 
 // TTT2_XAM_TRACE=1: each new (function, caller, user, result) of the user queries, timestamped.
 static void UserTrace(const char* fn, uint32_t lr, uint32_t user, uint32_t result)
@@ -104,7 +118,8 @@ PPC_FUNC(__imp__XamUserGetSigninState)
 {
     KTrace("XamUserGetSigninState");
     const uint32_t user = ctx.r3.u32;
-    ctx.r3.u32 = user == 0 && User0SignedIn() ? (TitleServerEnabled() ? 2 : 1) : 0;
+    ctx.r3.u32 = user == 0 && User0SignedIn() ? (TitleServerEnabled() ? 2 : 1) :
+                 user == 1 && User1DeviceSignedIn() ? 1 : 0;
     UserTrace("GetSigninState", uint32_t(ctx.lr), user, ctx.r3.u32);
 }
 
@@ -123,8 +138,10 @@ PPC_FUNC(__imp__XamUserGetXUID)
     GWrite32(base,out,0);GWrite32(base,out+4,0);
     if(user>=4 || (mask!=1&&mask!=2&&mask!=3&&mask!=4&&mask!=7))
     {ctx.r3.u32=0x80070057u;return;}
-    if(user!=0 || !(mask&3) || !User0SignedIn()){ctx.r3.u32=0x80070525u;UserTrace("GetXUID",uint32_t(ctx.lr),user,ctx.r3.u32);return;}
-    const uint64_t xuid=(mask&2) && TitleServerEnabled() ? xlive::OnlineXuid() : profiles::ActiveXuid();
+    const bool keyboardUser = user == 1 && User1DeviceSignedIn() && !g_user1PhysicalConnected.load(std::memory_order_relaxed);
+    if((user!=0 && !keyboardUser) || !(mask&3) || (user==0 && !User0SignedIn())){ctx.r3.u32=0x80070525u;UserTrace("GetXUID",uint32_t(ctx.lr),user,ctx.r3.u32);return;}
+    const uint64_t xuid=keyboardUser ? kKeyboardPlayerXuid : user == 1 ? kControllerPlayerXuid :
+        (mask&2) && TitleServerEnabled() ? xlive::OnlineXuid() : profiles::ActiveXuid();
     GWrite32(base,out,uint32_t(xuid>>32));GWrite32(base,out+4,uint32_t(xuid));
     ctx.r3.u32=0;
 }
@@ -135,7 +152,8 @@ PPC_FUNC(__imp__XamUserGetSigninInfo)
     uint32_t user = ctx.r3.u32, flags = ctx.r4.u32, info = ctx.r5.u32;
     if (!info) { ctx.r3.u32 = 0x80070057u; return; }               // E_INVALIDARG
     std::memset(base + info, 0, 0x28);
-    if (user != 0 || !User0SignedIn())                                 // HRESULT: no such user
+    const bool keyboardUser = user == 1 && User1DeviceSignedIn() && !g_user1PhysicalConnected.load(std::memory_order_relaxed);
+    if ((user != 0 && !keyboardUser) || (user == 0 && !User0SignedIn())) // HRESULT: no such user
     {
         ctx.r3.u32 = 0x80070525u;
         UserTrace("GetSigninInfo", uint32_t(ctx.lr), user, ctx.r3.u32);
@@ -145,8 +163,9 @@ PPC_FUNC(__imp__XamUserGetSigninInfo)
     // There is no online profile. Returning the local XUID for both makes the
     // game's profile monitor (82B37080) detect a sign-in transition every frame.
     // Matches Xenia Canary XamUserGetSigninInfo's offline-only behavior.
-    const bool live = TitleServerEnabled();
-    const profiles::Profile profile = profiles::Active();
+    const bool live = !keyboardUser && TitleServerEnabled();
+    const profiles::Profile profile = keyboardUser ? profiles::Profile{"Keyboard", kKeyboardPlayerXuid} :
+        user == 1 ? profiles::Profile{"Player 2", kControllerPlayerXuid} : profiles::Active();
     if (!flags || (flags & 2))
     {
         GWrite32(base, info + 0, uint32_t(profile.xuid >> 32));    // XUID (hi)
@@ -170,8 +189,9 @@ PPC_FUNC(__imp__XamUserGetName)
 {
     KTrace("XamUserGetName");
     uint32_t user = ctx.r3.u32, buf = ctx.r4.u32, size = ctx.r5.u32;
-    if (user != 0 || !buf || !size || !User0SignedIn()) { ctx.r3.u32 = 0x525; return; }
-    const std::string name = profiles::Active().name;
+    const bool keyboardUser = user == 1 && User1DeviceSignedIn() && !g_user1PhysicalConnected.load(std::memory_order_relaxed);
+    if ((user != 0 && !keyboardUser) || !buf || !size || (user == 0 && !User0SignedIn())) { ctx.r3.u32 = 0x525; return; }
+    const std::string name = keyboardUser ? "Keyboard" : user == 1 ? "Player 2" : profiles::Active().name;
     const uint32_t n = (std::min)(uint32_t(name.size()), size - 1);
     std::memcpy(base + buf, name.data(), n);
     GWrite8(base, buf + n, 0);
@@ -535,6 +555,16 @@ unsigned ReadPadPollRateHz()
         GetPrivateProfileIntW(L"Performance", L"InputPollHz", 1000, path.c_str())));
 }
 
+int ReadPadAssignmentMode()
+{
+    wchar_t localAppData[MAX_PATH]{};
+    const DWORD length = GetEnvironmentVariableW(L"LOCALAPPDATA", localAppData, MAX_PATH);
+    if (!length || length >= MAX_PATH) return 1;
+    std::wstring path(localAppData);
+    path += L"\\TTT2Recomp\\launcher.ini";
+    return std::clamp(static_cast<int>(GetPrivateProfileIntW(L"Controls", L"PadAssignMode", 1, path.c_str())), 0, 3);
+}
+
 PadSnapshot g_pads[4];
 std::atomic<bool> g_padThreadStarted{false};
 
@@ -545,7 +575,7 @@ bool Player2KeyboardEnabled()
     if (!length || length >= MAX_PATH) return false;
     std::wstring path(localAppData);
     path += L"\\TTT2Recomp\\launcher.ini";
-    return GetPrivateProfileIntW(L"Controls", L"Player2Keyboard", 0, path.c_str()) != 0;
+    return GetPrivateProfileIntW(L"Controls", L"Player2Keyboard", 0, path.c_str()) != 0 || ReadPadAssignmentMode() == 2;
 }
 
 // Keyboard controls augment player 0 even when a controller is connected. Physical
@@ -603,6 +633,7 @@ struct PadPollState
     XINPUT_CAPABILITIES physicalCaps[4]{};
     unsigned disconnectedBackoff[4]{};
     bool keyboardEverPressed = false;
+    int assignmentMode = -1;
     // Host pad -> guest user, -1 until the pad is first used. A pad claims the lowest user no
     // other claimed pad holds on its first button or trigger press (sticks drift, so they do
     // not count), and keeps it across disconnects. Whoever picks up a controller is player 1
@@ -726,6 +757,10 @@ static uint16_t ScriptButtons(PadScript& s, uint64_t now, int player = 0)
 void PublishPad(DWORD index, bool connected, bool physical,
                 const XINPUT_STATE& state, const XINPUT_CAPABILITIES& caps)
 {
+    if (index == 1) {
+        g_user1DeviceConnected.store(connected, std::memory_order_relaxed);
+        g_user1PhysicalConnected.store(connected && physical, std::memory_order_relaxed);
+    }
     auto& pad = g_pads[index];
     std::lock_guard lk(pad.m);
     // One guest packet sequence spans keyboard and physical input. Raw host and
@@ -743,8 +778,22 @@ void PublishPad(DWORD index, bool connected, bool physical,
 }
 
 void PollPadsOnce(PadPollState& polling, bool autoStart, uint64_t elapsedMs, PadScript* script = nullptr,
-                  bool player2KeyboardEnabled = false)
+                  bool player2KeyboardEnabled = false, int assignmentMode = 0)
 {
+    assignmentMode = std::clamp(assignmentMode, 0, 3);
+    if (polling.assignmentMode != assignmentMode)
+    {
+        polling.guestOf[0] = polling.guestOf[1] = polling.guestOf[2] = polling.guestOf[3] = -1;
+        if (assignmentMode == 1)
+            for (int i = 0; i < 3; ++i) polling.guestOf[i] = i + 1;
+        else if (assignmentMode == 2)
+        {
+            polling.guestOf[0] = 0;
+            polling.guestOf[1] = 2;
+            polling.guestOf[2] = 3;
+        }
+        polling.assignmentMode = assignmentMode;
+    }
     // AUTOSTART is an explicit unattended test mode. Apply its START pulse to
     // controller 0 even when a physical pad is present or the window is inactive.
     const bool startPulse = autoStart && elapsedMs > 45000 && (elapsedMs % 9000) < 300;
@@ -782,12 +831,14 @@ void PollPadsOnce(PadPollState& polling, bool autoStart, uint64_t elapsedMs, Pad
     }
 
     auto claimed = [&](int user) {
+        if (assignmentMode == 2 && user == 1) return true; // Reserve P2 for the second keyboard.
         for (DWORD j = 0; j < 4; ++j)
             if (polling.guestOf[j] == user) return true;
         return false;
     };
     for (DWORD i = 0; i < 4; ++i)
     {
+        if (assignmentMode == 1) continue; // Keep physical devices out of Player 1's keyboard slot.
         const XINPUT_GAMEPAD& g = sampled[i].Gamepad;
         const bool used = g.wButtons || g.bLeftTrigger > XINPUT_GAMEPAD_TRIGGER_THRESHOLD ||
                           g.bRightTrigger > XINPUT_GAMEPAD_TRIGGER_THRESHOLD;
@@ -800,6 +851,7 @@ void PollPadsOnce(PadPollState& polling, bool autoStart, uint64_t elapsedMs, Pad
         if (polling.guestOf[i] >= 0 && polling.physicalConnected[i]) source[polling.guestOf[i]] = int(i);
     for (DWORD i = 0; i < 4; ++i)
     {
+        if (assignmentMode == 1) continue; // The selected P2 pad is slot 0; later pads are ignored.
         if (polling.guestOf[i] >= 0 || !polling.physicalConnected[i]) continue;
         for (int user = 0; user < 4; ++user)
             if (source[user] < 0 && !claimed(user)) { source[user] = int(i); break; }
@@ -882,6 +934,7 @@ void PadPollThread()
     PadPollState polling;
     const bool autoStart = AutoStartEnabled(std::getenv("TTT2_AUTOSTART"));
     const unsigned requestedPollRateHz = ReadPadPollRateHz();
+    const int assignmentMode = ReadPadAssignmentMode();
     const unsigned pollRateHz = EffectivePadPollRateHz(requestedPollRateHz);
     const auto pollInterval = PadPollIntervalForHz(pollRateHz);
     std::fprintf(stderr, "[input] automatic Start %s; requested %u Hz, host polling at %u Hz (%lld ns interval)\n",
@@ -890,14 +943,15 @@ void PadPollThread()
     PadScript script;
     LoadScript(script, std::getenv("TTT2_INPUT_SCRIPT"));
     const bool player2KeyboardEnabled = Player2KeyboardEnabled();
-    std::fprintf(stderr, "[input] player 2 keyboard %s\n", player2KeyboardEnabled ? "enabled" : "disabled");
+    std::fprintf(stderr, "[input] player 2 keyboard %s; device assignment mode %d\n",
+                 player2KeyboardEnabled ? "enabled" : "disabled", assignmentMode);
     const auto started = std::chrono::steady_clock::now();
     auto nextPoll = started;
     for (;;)
     {
         const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - started).count();
-        PollPadsOnce(polling, autoStart, uint64_t(elapsed), &script, player2KeyboardEnabled);
+        PollPadsOnce(polling, autoStart, uint64_t(elapsed), &script, player2KeyboardEnabled, assignmentMode);
         nextPoll += pollInterval;
         std::this_thread::sleep_until(nextPoll);
         const auto now = std::chrono::steady_clock::now();

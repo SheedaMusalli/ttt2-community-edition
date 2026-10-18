@@ -54,6 +54,15 @@ if(WIN32)
     target_include_directories(ttt2_test_save_store PRIVATE src/runtime/kernel)
     target_compile_definitions(ttt2_test_save_store PRIVATE TTT2_LOCAL_SAVES=1 _CRT_SECURE_NO_WARNINGS)
 endif()
+add_library(ttt2_net_support STATIC
+    src/runtime/net/net_adapter.cpp
+    src/runtime/net/net_telemetry.cpp
+    src/runtime/net/packet_window.cpp
+    src/runtime/net/virtual_lan.cpp)
+target_include_directories(ttt2_net_support PUBLIC src/runtime/net)
+target_compile_definitions(ttt2_net_support PRIVATE _CRT_SECURE_NO_WARNINGS)
+target_link_libraries(ttt2_net_support PUBLIC ws2_32 iphlpapi)
+
 add_library(ttt2_enet STATIC
     third_party/enet/callbacks.c
     third_party/enet/compress.c
@@ -74,17 +83,26 @@ if(WIN32)
         src/runtime/kernel/net_transport.cpp)
     target_include_directories(ttt2_test_xnet_route PRIVATE src/runtime/kernel)
     target_compile_definitions(ttt2_test_xnet_route PRIVATE _CRT_SECURE_NO_WARNINGS)
-    target_link_libraries(ttt2_test_xnet_route PRIVATE ws2_32 ttt2_enet)
+    target_link_libraries(ttt2_test_xnet_route PRIVATE ws2_32 ttt2_enet ttt2_net_support)
     add_executable(ttt2_test_ranked_e2e
         tools/test_ranked_e2e.cpp
         src/runtime/kernel/net_transport.cpp
         src/runtime/kernel/ranked_adapter.cpp)
     target_include_directories(ttt2_test_ranked_e2e PRIVATE src/runtime/kernel)
     target_compile_definitions(ttt2_test_ranked_e2e PRIVATE _CRT_SECURE_NO_WARNINGS)
-    target_link_libraries(ttt2_test_ranked_e2e PRIVATE ws2_32 winhttp ttt2_enet)
+    target_link_libraries(ttt2_test_ranked_e2e PRIVATE ws2_32 winhttp ttt2_enet ttt2_net_support)
 endif()
+add_executable(ttt2_test_net_support tools/test_net_support.cpp)
+target_include_directories(ttt2_test_net_support PRIVATE src/runtime)
+target_link_libraries(ttt2_test_net_support PRIVATE ttt2_net_support gdi32 user32)
+target_compile_definitions(ttt2_test_net_support PRIVATE _CRT_SECURE_NO_WARNINGS)
+add_executable(ttt2_test_virtual_lan tools/test_virtual_lan.cpp src/runtime/kernel/net_transport.cpp src/runtime/kernel/matchmaking.cpp)
+target_include_directories(ttt2_test_virtual_lan PRIVATE src/runtime/kernel)
+target_link_libraries(ttt2_test_virtual_lan PRIVATE ttt2_enet ttt2_net_support)
+target_compile_definitions(ttt2_test_virtual_lan PRIVATE _CRT_SECURE_NO_WARNINGS)
 include(CTest)
 if(BUILD_TESTING)
+    add_test(NAME net_support COMMAND ttt2_test_net_support "${CMAKE_BINARY_DIR}/netplay-hud-preview.bmp")
     add_test(NAME rollback_loop COMMAND ttt2_test_rollback)
     add_test(NAME netplay_input COMMAND ttt2_test_netplay_input)
     if(WIN32)
@@ -92,6 +110,8 @@ if(BUILD_TESTING)
         add_test(NAME xnet_route COMMAND ttt2_test_xnet_route)
         set_tests_properties(xnet_route PROPERTIES TIMEOUT 30 ENVIRONMENT "TTT2_NET=loopback")
         find_package(Python3 COMPONENTS Interpreter REQUIRED)
+        add_test(NAME virtual_lan COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tools/run_virtual_lan_test.py" "$<TARGET_FILE:ttt2_test_virtual_lan>")
+        set_tests_properties(virtual_lan PROPERTIES TIMEOUT 40)
         add_test(NAME ranked_e2e COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tools/run_ranked_e2e.py" "$<TARGET_FILE:ttt2_test_ranked_e2e>")
         set_tests_properties(ranked_e2e PROPERTIES TIMEOUT 60 ENVIRONMENT "TTT2_NET=ipv4")
         if(BUILD_RELAY_DAEMON)
@@ -211,7 +231,7 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang" AND CMAKE_CXX_COMPILER_FRONTEND_VARIAN
     # Allow optimized renderer/runtime helpers to inline even in the Debug configuration.
     target_compile_options(tekken_recomp PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:/clang:-finline>")
 endif()
-target_link_libraries(tekken_recomp PRIVATE tekken_ppc xaudio2 ole32 winmm ttt2_ffmpeg bcrypt ws2_32 winhttp ttt2_enet)
+target_link_libraries(tekken_recomp PRIVATE tekken_ppc xaudio2 ole32 winmm ttt2_ffmpeg bcrypt ws2_32 winhttp ttt2_enet ttt2_net_support)
 # Steam online (kernel/steam_net.cpp, port/ONLINE_PLAN.md): built when the Steamworks SDK sits in
 # tools/steamworks_sdk_165 (user-supplied, not part of the repository). steam_api64.dll is
 # delay-loaded and copied next to the executable; without it (or without a running Steam
@@ -237,7 +257,7 @@ target_link_options(tekken_recomp PRIVATE "/MAP:tekken_recomp.map")
 
 # --- Version, icon -------------------------------------------------------------------------
 # One version for the game executable's VERSIONINFO, the installer and Add or remove programs.
-set(TTT2_VERSION "2.2.0")
+set(TTT2_VERSION "2.3.0")
 string(REPLACE "." "," TTT2_VERSION_COMMAS "${TTT2_VERSION},0")
 # Original TTT2 Community Edition mark, shared by the installer and installed game executable.
 set(TTT2_SETUP_ICON "${CMAKE_SOURCE_DIR}/src/setup/ttt2.ico")
@@ -259,9 +279,9 @@ set(TTT2_GAME_RESOURCE "${TTT2_GAME_EXE}.lzms")
 set(TTT2_LAUNCHER_EXE "${TTT2_PAYLOAD_DIR}/TTT2 Launcher.exe")
 configure_file(src/launcher/launcher.rc.in "${CMAKE_BINARY_DIR}/launcher.rc" @ONLY)
 set_source_files_properties("${CMAKE_BINARY_DIR}/launcher.rc" PROPERTIES OBJECT_DEPENDS "${TTT2_SETUP_ICON}")
-add_executable(ttt2_launcher WIN32 src/launcher/launcher.cpp "${CMAKE_BINARY_DIR}/launcher.rc")
-target_link_libraries(ttt2_launcher PRIVATE comctl32 shell32 ole32 uxtheme dwmapi winhttp crypt32 bcrypt)
-target_compile_definitions(ttt2_launcher PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
+add_executable(ttt2_launcher WIN32 src/launcher/launcher.cpp src/runtime/net/net_adapter.cpp "${CMAKE_BINARY_DIR}/launcher.rc")
+target_link_libraries(ttt2_launcher PRIVATE comctl32 shell32 ole32 uxtheme dwmapi winhttp crypt32 bcrypt ws2_32 iphlpapi)
+target_compile_definitions(ttt2_launcher PRIVATE _CRT_SECURE_NO_WARNINGS UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
     TTT2_VERSION_STR="${TTT2_VERSION}")
 if(MSVC)
     target_compile_options(ttt2_launcher PRIVATE /O2)
@@ -295,7 +315,7 @@ elseif(DEFINED ENV{VSINSTALLDIR})
 elseif(CMAKE_CXX_COMPILER_AR)
     # For Ninja builds, derive the VS root from the bundled LLVM archive tool.
     get_filename_component(TTT2_TOOLCHAIN_BIN "${CMAKE_CXX_COMPILER_AR}" DIRECTORY)
-    get_filename_component(TTT2_VS_ROOT "${TTT2_TOOLCHAIN_BIN}/../../../.." ABSOLUTE)
+    get_filename_component(TTT2_VS_ROOT "${TTT2_TOOLCHAIN_BIN}/../../../../.." ABSOLUTE)
 endif()
 if(TTT2_VS_ROOT)
     file(GLOB TTT2_CRT_DIRS "${TTT2_VS_ROOT}/VC/Redist/MSVC/*/x64/Microsoft.VC*.CRT")

@@ -18,6 +18,7 @@
 #include "kernel_trace.h"
 #include "gpu_render.h"
 #include "performance_overlay.h"
+#include "../net/net_telemetry.h"
 #include "phys_mirror.h"
 #include "gpu_ring_reader.h"
 #include "bounded_format.h"
@@ -205,6 +206,7 @@ static LRESULT CALLBACK GameWndProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         if (SysUiTextEntryActive()) { SysUiOnChar(static_cast<uint32_t>(wp)); return 0; }
         break;
     case WM_KEYDOWN:
+        if(wp==VK_F2 && !(lp&(1ll<<30)) && !SysUiTextEntryActive()){net::telemetry::ToggleHud();return 0;}
         if (wp == VK_ESCAPE && SysUiTextEntryActive()) { SysUiOnChar(0x1B); return 0; }
         break;
     }

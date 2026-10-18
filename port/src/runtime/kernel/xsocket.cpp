@@ -16,6 +16,10 @@
 #include "kernel_trace.h"
 #include "net_transport.h"
 #include "xlive.h"
+#include "../net/net_adapter.h"
+#include "../net/packet_window.h"
+#include "../net/net_telemetry.h"
+#include <tuple>
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
@@ -61,6 +65,13 @@ std::map<uint32_t, Socket> g_sockets;
 uint32_t g_nextHandle = 0xD4000000u;
 uint16_t g_nextEphemeral = 49152;
 thread_local uint32_t t_error = 0;
+using StreamKey=std::tuple<uint64_t,uint16_t,uint16_t,uint8_t>;
+std::map<StreamKey,net::PacketWindow> g_windows;
+uint32_t g_epoch=uint32_t(GetTickCount())|1u;
+net::PacketWindow& Window(uint64_t peer,uint16_t local,uint16_t remote,uint8_t proto){
+    auto key=StreamKey{peer,local,remote,proto};auto it=g_windows.find(key);
+    if(it==g_windows.end()){if(g_windows.size()>=256)g_windows.erase(g_windows.begin());if(!++g_epoch)++g_epoch;it=g_windows.try_emplace(key,g_epoch).first;}return it->second;
+}
 
 bool Trace() { static const bool on = std::getenv("TTT2_NET_TRACE") != nullptr; return on; }
 
@@ -74,11 +85,16 @@ bool SendPacket(uint64_t peer, net::Channel channel, Op op, uint8_t proto, bool 
                 uint32_t connId, const uint8_t* data, size_t size)
 {
     thread_local std::vector<uint8_t> packet;
-    packet.resize(sizeof(Header) + size);
+    std::vector<uint8_t> bundled;
     Header h{ op, proto, uint8_t(toConnector), 0, src, dst, connId };
+    if(peer && op==Op::Datagram && net::RedundancyEnabled() && size<=net::kMaxRecoveryPayload){
+        bundled=Window(peer,src,dst,proto).Encode(data,size,net::telemetry::NowMs());
+        if(bundled.empty())return false;h.pad=1;data=bundled.data();size=bundled.size();
+    }
+    packet.resize(sizeof(Header) + size);
     std::memcpy(packet.data(), &h, sizeof(h));
     if (size) std::memcpy(packet.data() + sizeof(h), data, size);
-    return net::Send(peer, channel, packet.data(), packet.size());
+    return peer ? net::Send(peer, channel, packet.data(), packet.size()) : net::BroadcastDatagram(packet.data(),packet.size());
 }
 
 Socket* Find(uint32_t handle)
@@ -161,20 +177,25 @@ void Receive(uint64_t from, net::Channel, const uint8_t* data, size_t size)
     {
     case Op::Datagram:
     {
-        bool delivered = false;
-        for (auto& [handle, s] : g_sockets)
-            if (s.kind == Kind::Datagram && s.bound && s.port == h.dstPort && s.proto == h.proto)
-            {
-                if (s.datagrams.size() < 512)
-                {
-                    s.datagrams.push_back({ fromAddr, h.srcPort, std::vector<uint8_t>(payload, payload + payloadSize) });
-                    delivered = true;
+        if(h.pad>1)return;
+        bool bound=false;for(const auto& entry:g_sockets)if(entry.second.kind==Kind::Datagram&&entry.second.bound&&entry.second.port==h.dstPort&&entry.second.proto==h.proto){bound=true;break;}
+        if(!bound)break;
+        std::vector<std::vector<uint8_t>> payloads;
+        if(h.pad==1){
+            auto result=Window(from,h.dstPort,h.srcPort,h.proto).Decode(payload,payloadSize,net::telemetry::NowMs());
+            if(!result.valid)return;
+            net::telemetry::Observe(result.rtt_ms,result.recovered,result.lost,result.rtt_valid);
+            if(!result.payloads.empty())net::telemetry::SetState(net::telemetry::State::Synced);
+            payloads=std::move(result.payloads);
+        }else payloads.emplace_back(payload,payload+payloadSize);
+        for(auto& incoming:payloads){
+            for(auto& entry:g_sockets){auto& socket=entry.second;
+                if(socket.kind==Kind::Datagram&&socket.bound&&socket.port==h.dstPort&&socket.proto==h.proto){
+                    if(socket.datagrams.size()<512)socket.datagrams.push_back({fromAddr,h.srcPort,std::move(incoming)});
+                    break;
                 }
-                break;
             }
-        if (!delivered && Trace())
-            std::fprintf(stderr, "[xsocket] rx datagram DROPPED: no socket bound to proto %u port %u (or queue full)\n",
-                         h.proto, h.dstPort);
+        }
         break;
     }
     case Op::Syn:
@@ -236,7 +257,7 @@ PPC_FUNC(__imp__NetDll_socket)
 {
     KTrace("NetDll_socket");
     const uint32_t af = ctx.r4.u32, type = ctx.r5.u32, protocol = ctx.r6.u32;
-    EnsureTransport();
+    if(!EnsureTransport()){ctx.r3.u64=uint32_t(Fail(WSAEHOSTUNREACH_));return;}
     Socket s;
     if (af != 2) { ctx.r3.u64 = uint32_t(Fail(WSAEPROTONOSUPPORT_)); return; }
     if (type == 1 || (type == 0 && protocol == 6)) { s.kind = Kind::Stream; s.proto = 6; }
@@ -261,6 +282,7 @@ PPC_FUNC(__imp__NetDll_closesocket)
     if (!s) { ctx.r3.u64 = uint32_t(Fail(WSAENOTSOCK_)); return; }
     if (s->kind == Kind::Stream && s->state == TcpState::Connected && !s->sendShut)
         SendPacket(s->peer, net::Channel::Reliable, Op::Fin, 6, !s->connector, s->port, s->peerPort, s->connId, nullptr, 0);
+    for(auto it=g_windows.begin();it!=g_windows.end();)if(std::get<1>(it->first)==s->port)it=g_windows.erase(it);else ++it;
     for (const uint32_t pending : s->accepted) g_sockets.erase(pending);
     g_sockets.erase(ctx.r4.u32);
     g_cv.notify_all();
@@ -395,13 +417,17 @@ static int SendCommon(uint8_t* base, uint32_t handle, uint32_t buffer, uint32_t 
         }
         return int(length);
     }
+    if(!s->bound){s->port=Ephemeral();s->bound=true;}
     uint64_t peer = s->peer;
     uint16_t port = s->peerPort;
     if (to)
     {
         uint32_t addr = 0;
         ReadAddr(base, to, addr, port);
-        if (addr == 0xFFFFFFFFu) return int(length);       // LAN broadcast: no LAN here
+        if(net::IsBroadcastIPv4(addr)){
+            if(length>1400)return Fail(WSAEMSGSIZE_);
+            return SendPacket(0,net::Channel::Unreliable,Op::Datagram,s->proto,false,s->port,port,0,base+buffer,length)?int(length):Fail(WSAEHOSTUNREACH_);
+        }
         peer = xlive::PeerOfAddr(addr);
     }
     if (!peer)
@@ -411,7 +437,7 @@ static int SendCommon(uint8_t* base, uint32_t handle, uint32_t buffer, uint32_t 
     }
     if (length > 1400) return Fail(WSAEMSGSIZE_);
     if (!s->bound) { s->port = Ephemeral(); s->bound = true; }
-    SendPacket(peer, net::Channel::Unreliable, Op::Datagram, s->proto, false, s->port, port, 0, base + buffer, length);
+    if(!SendPacket(peer, net::Channel::Unreliable, Op::Datagram, s->proto, false, s->port, port, 0, base + buffer, length))return Fail(WSAEHOSTUNREACH_);
     TraceBytes("sendto", handle, xlive::AddrOfPeer(peer), port, base + buffer, int(length));
     return int(length);
 }

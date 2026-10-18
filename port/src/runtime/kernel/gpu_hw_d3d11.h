@@ -18,6 +18,8 @@
 // resolve. Include inside gpu_render.cpp after Vertex/Surface/Texture and the interpreter.
 #include "gpu_hw_translate.h"
 #include "display_settings.h"
+#include "performance_overlay.h"
+#include "../net/net_hud_surface.h"
 #include <d3d11_1.h>
 #include <d3d11_4.h>
 #include <dxgi1_2.h>
@@ -1104,6 +1106,7 @@ public:
         const bool swap = storedSwap != displaySwapRB;
         const auto t2 = clock::now();
         PresentScaled(source, back.Get(), swap);
+        PresentNetplayHud();
         lastSwap_ = swap;
         const auto t3 = clock::now();
         static const bool noWait = [] { const char* e = std::getenv("TTT2_PRESENT_NOWAIT"); return e && *e == '1'; }();
@@ -1369,6 +1372,49 @@ private:
     ComPtr<ID3D11VertexShader> presentVs_;
     ComPtr<ID3D11PixelShader> presentPs_[4];
     ComPtr<ID3D11SamplerState> presentSampler_;
+    std::unique_ptr<net::hud::Surface> netHudSurface_;
+    ComPtr<ID3D11Texture2D> netHudTexture_;
+    ComPtr<ID3D11ShaderResourceView> netHudSrv_;
+    ComPtr<ID3D11PixelShader> netHudPs_;
+    ComPtr<ID3D11BlendState> netHudBlend_;
+    uint64_t netHudPaintMs_=0;
+    bool netHudFailed_=false;
+    void PresentNetplayHud()
+    {
+        if(netHudFailed_||!net::telemetry::HudVisible())return;
+        try {
+            if(!netHudSurface_){
+                netHudSurface_=std::make_unique<net::hud::Surface>();
+                if(!netHudSurface_->Pixels())throw std::runtime_error("HUD bitmap allocation failed");
+                D3D11_TEXTURE2D_DESC d{};d.Width=net::hud::Width;d.Height=net::hud::Height;d.MipLevels=d.ArraySize=1;d.Format=DXGI_FORMAT_B8G8R8A8_UNORM;d.SampleDesc.Count=1;d.Usage=D3D11_USAGE_DYNAMIC;d.BindFlags=D3D11_BIND_SHADER_RESOURCE;d.CPUAccessFlags=D3D11_CPU_ACCESS_WRITE;
+                Check(device_->CreateTexture2D(&d,nullptr,&netHudTexture_),"CreateNetHudTexture");
+                Check(device_->CreateShaderResourceView(netHudTexture_.Get(),nullptr,&netHudSrv_),"CreateNetHudSrv");
+                const auto ps=Compile("Texture2D<float4> t:register(t0);SamplerState s:register(s0);float4 main(float4 p:SV_Position,float2 uv:TEXCOORD0):SV_Target{return float4(t.SampleLevel(s,uv,0).rgb,0.88);}","ps_5_0","ttt2 netplay HUD");
+                Check(device_->CreatePixelShader(ps->GetBufferPointer(),ps->GetBufferSize(),nullptr,&netHudPs_),"CreateNetHudPs");
+                D3D11_BLEND_DESC blend{};auto& b=blend.RenderTarget[0];b.BlendEnable=TRUE;b.SrcBlend=D3D11_BLEND_SRC_ALPHA;b.DestBlend=D3D11_BLEND_INV_SRC_ALPHA;b.BlendOp=D3D11_BLEND_OP_ADD;b.SrcBlendAlpha=D3D11_BLEND_ONE;b.DestBlendAlpha=D3D11_BLEND_ZERO;b.BlendOpAlpha=D3D11_BLEND_OP_ADD;b.RenderTargetWriteMask=D3D11_COLOR_WRITE_ENABLE_ALL;
+                Check(device_->CreateBlendState(&blend,&netHudBlend_),"CreateNetHudBlend");
+                std::fprintf(stderr,"[net-hud] D3D11 HUD initialized\n");
+            }
+            const auto now=net::telemetry::NowMs();
+            if(!netHudPaintMs_||now-netHudPaintMs_>=16){
+                netHudSurface_->Render(net::telemetry::Read());D3D11_MAPPED_SUBRESOURCE map{};
+                if(SUCCEEDED(context_->Map(netHudTexture_.Get(),0,D3D11_MAP_WRITE_DISCARD,0,&map))){
+                    for(int y=0;y<net::hud::Height;++y)std::memcpy(static_cast<uint8_t*>(map.pData)+size_t(y)*map.RowPitch,static_cast<const uint8_t*>(netHudSurface_->Pixels())+size_t(y)*net::hud::Width*4,net::hud::Width*4);
+                    context_->Unmap(netHudTexture_.Get(),0);netHudPaintMs_=now;
+                }
+            }
+            const float scale=std::min(1.0f,std::min(float(bufW_)/float(net::hud::Width+24),float(bufH_)/float(net::hud::Height+24)));
+            const float width=net::hud::Width*scale,height=net::hud::Height*scale;
+            int position=3;if(const char* value=std::getenv("TTT2_NET_HUD_POSITION"))position=std::clamp(std::atoi(value),0,3);
+            const int performanceBottom=performance_overlay::VisibleBottom();
+            float x=position%2?float(bufW_)-width-12:12.0f,y=position>=2?float(bufH_)-height-12:12.0f;
+            if(position==0&&performanceBottom>0&&performanceBottom+height+8<float(bufH_))y=float(performanceBottom+8);
+            D3D11_VIEWPORT vp{std::max(0.0f,x),std::max(0.0f,y),width,height,0,1};
+            context_->RSSetViewports(1,&vp);context_->OMSetBlendState(netHudBlend_.Get(),nullptr,0xFFFFFFFF);
+            context_->PSSetShader(netHudPs_.Get(),nullptr,0);ID3D11ShaderResourceView* srv=netHudSrv_.Get();context_->PSSetShaderResources(0,1,&srv);context_->Draw(3,0);
+            srv=nullptr;context_->PSSetShaderResources(0,1,&srv);context_->OMSetBlendState(nullptr,nullptr,0xFFFFFFFF);
+        }catch(const std::exception& error){netHudFailed_=true;std::fprintf(stderr,"[net-hud] disabled: %s\n",error.what());}
+    }
     void PresentScaled(ID3D11Texture2D* source, ID3D11Texture2D* back, bool swap)
     {
         if (!presentVs_)

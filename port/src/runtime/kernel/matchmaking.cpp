@@ -1,9 +1,9 @@
 // Session discovery (matchmaking.h): the folder backend.
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
 #include "matchmaking.h"
 #include "net_transport.h"
 #include "steam_net.h"
+#include "../net/virtual_lan.h"
+#include "../net/net_telemetry.h"
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
@@ -13,6 +13,7 @@
 #include <fstream>
 #include <map>
 #include <mutex>
+#include <string>
 #include <thread>
 
 namespace mm {
@@ -25,6 +26,8 @@ std::mutex g_mutex;
 std::map<uint64_t, SessionRecord> g_owned;
 std::map<uint64_t, SessionRecord> g_seen;       // listed or invited sessions, for Find
 bool g_heartbeat = false;
+std::vector<uint8_t> Serialize(const SessionRecord& r);
+bool Deserialize(const std::vector<uint8_t>& v, SessionRecord& r);
 
 bool Steam() { return std::strcmp(net::BackendName(), "steam") == 0; }
 
@@ -117,7 +120,7 @@ void Heartbeat()
     {
         std::this_thread::sleep_for(std::chrono::seconds(2));
         std::lock_guard l(g_mutex);
-        for (const auto& [id, r] : g_owned) Write(r);
+        for (const auto& entry : g_owned) { if(net::VirtualLanEnabled())net::lan::Publish(entry.first,Serialize(entry.second));else Write(entry.second); }
     }
 }
 
@@ -141,16 +144,17 @@ bool Load(const std::filesystem::path& file, SessionRecord& r)
 
 void Publish(const SessionRecord& record)
 {
+    const SessionRecord& published = record;
     std::lock_guard l(g_mutex);
-    g_owned[record.id] = record;
-    if (Steam()) steamnet::PublishLobby(record.id, Serialize(record));
+    g_owned[published.id] = published;
+    if (Steam()) steamnet::PublishLobby(published.id, Serialize(published));
     else
     {
-        Write(record);
+        if(net::VirtualLanEnabled())net::lan::Publish(published.id,Serialize(published));else Write(published);
         if (!g_heartbeat) { g_heartbeat = true; std::thread(Heartbeat).detach(); }
     }
-    std::fprintf(stderr, "[mm] published %016llX (slots %u/%u)\n", (unsigned long long)record.id,
-                 record.filledPublic, record.maxPublic);
+    std::fprintf(stderr, "[mm] published %016llX (slots %u/%u)\n", (unsigned long long)published.id,
+                 published.filledPublic, published.maxPublic);
 }
 
 void Remove(uint64_t id)
@@ -158,6 +162,7 @@ void Remove(uint64_t id)
     std::lock_guard l(g_mutex);
     if (!g_owned.erase(id)) return;
     if (Steam()) steamnet::RemoveLobby(id);
+    if(net::VirtualLanEnabled())net::lan::Remove(id);
     std::error_code ec;
     std::filesystem::remove(FileOf(id), ec);
     std::fprintf(stderr, "[mm] removed %016llX\n", (unsigned long long)id);
@@ -165,6 +170,15 @@ void Remove(uint64_t id)
 
 std::vector<SessionRecord> List(uint32_t max)
 {
+    if(net::VirtualLanEnabled()){
+        net::telemetry::SetState(net::telemetry::State::Searching);
+        std::vector<SessionRecord> out;
+        for(const auto& bytes:net::lan::List()){
+            SessionRecord r;if(out.size()>=max||!Deserialize(bytes,r)||r.hostPeer==net::LocalPeer())continue;
+            {std::lock_guard l(g_mutex);g_seen[r.id]=r;}out.push_back(std::move(r));
+        }
+        return out;
+    }
     if (Steam())
     {
         std::vector<SessionRecord> out;
@@ -200,6 +214,9 @@ std::vector<SessionRecord> List(uint32_t max)
 
 bool Find(uint64_t id, SessionRecord& out)
 {
+    if(net::VirtualLanEnabled()){
+        for(const auto& bytes:net::lan::List(0)){SessionRecord r;if(Deserialize(bytes,r)&&r.id==id){out=std::move(r);return true;}}return false;
+    }
     {
         std::lock_guard l(g_mutex);
         const auto it = g_seen.find(id);

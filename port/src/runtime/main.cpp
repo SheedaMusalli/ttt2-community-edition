@@ -7,6 +7,8 @@
 #include "kernel/phys_mirror.h"
 #include "kernel/xma.h"
 #include "kernel/steam_net.h"
+#include "kernel/xlive.h"
+#include "net/net_adapter.h"
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <tlhelp32.h>
@@ -481,9 +483,17 @@ int main(int argc, char** argv)
     // The Steam helper process (kernel/steam_bridge.cpp): Steam lives there so Steam Input does
     // not hide the controllers from the game. Nothing of the game starts in it.
     if (argc >= 2 && std::strcmp(argv[1], "--steam-bridge") == 0) return steamnet::RunBridge();
+    int kept=1;
+    for(int i=1;i<argc;++i){
+        if(std::strncmp(argv[i],"--peer-ip=",10)==0){_putenv_s("TTT2_PEER_IP",argv[i]+10);if(!std::getenv("TTT2_NET"))_putenv_s("TTT2_NET","hamachi");}
+        else if(std::strncmp(argv[i],"--local-ip=",11)==0){_putenv_s("TTT2_LOCAL_IP",argv[i]+11);if(!std::getenv("TTT2_NET"))_putenv_s("TTT2_NET","hamachi");}
+        else argv[kept++]=argv[i];
+    }
+    argc=kept;argv[argc]=nullptr;
     const std::string installedImage = InstalledLayout(argc);
     std::setvbuf(stderr, nullptr, _IONBF, 0);   // unbuffered: trace survives a hard crash
     StartLogWriter();
+    if(net::VirtualLanEnabled()&&!XSocketStartTransport())std::fprintf(stderr,"[net] LAN transport initialization failed; check adapter/bind configuration\n");
 
     // Timer resolution. Since Windows 10 2004 a process that never calls timeBeginPeriod
     // gets the default ~15.6 ms timer even if other processes asked for more, so every

@@ -65,5 +65,12 @@ bool RegisterRelayPeer(uint64_t peer, const char* ipv4, uint16_t port, const uin
 bool SetListenPort(uint16_t port);       // set before Start; 0 asks the OS for an ephemeral port
 bool Send(uint64_t peer, Channel channel, const void* data, size_t size);
 const char* BackendName();
+bool IsBroadcastIPv4(uint32_t hostAddress);
+uint32_t LocalIPv4(); // numeric host-order address for LAN XNADDR, 0 outside LAN mode
+uint16_t ListenPort();
+bool BroadcastDatagram(const void* bytes, size_t size);
+// This must be fed by a verified guest simulation hook, never packet/present counters.
+void ReportSimulationSync(uint64_t localFrame, uint64_t remoteFrame, float remoteAdvantage);
+void NetTransport_ApplyFrameRiftPacing();
 
 } // namespace net

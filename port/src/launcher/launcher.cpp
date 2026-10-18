@@ -10,6 +10,7 @@
 #define TTT2_WIDE2(s) L##s
 #define TTT2_WIDE(s) TTT2_WIDE2(s)
 #include <windows.h>
+#include "../runtime/net/net_adapter.h"
 #include <commdlg.h>
 #include <commctrl.h>
 #include <shlobj.h>
@@ -49,7 +50,7 @@ constexpr int kFooterHeight = 72;
 constexpr int kContentMargin = 34;
 constexpr int kMaxContentWidth = 1440;
 constexpr std::array<int,7> kInputPollRates{250,500,750,1000,2000,4000,8000};
-enum : int { ID_HOME=100, ID_GRAPHICS, ID_PERFORMANCE, ID_GAME, ID_ADVANCED, ID_CONTROLS, ID_ONLINE,
+enum : int { ID_HOME=100, ID_GRAPHICS, ID_PERFORMANCE, ID_GAME, ID_ADVANCED, ID_CONTROLS, ID_ONLINE, ID_VPNLAN,
              ID_SAVE=180, ID_PLAY, ID_MODE=200, ID_RESOLUTION, ID_SCALE,
              ID_ASYNC=210, ID_WARM, ID_FAST, ID_HARDWARE, ID_INPUT_POLL_RATE, ID_DRAW_DIAGNOSTICS,
              ID_SAVE_PATH=220, ID_BROWSE, ID_OPEN_SAVES,
@@ -59,8 +60,8 @@ enum : int { ID_HOME=100, ID_GRAPHICS, ID_PERFORMANCE, ID_GAME, ID_ADVANCED, ID_
              ID_RANKED_QUEUE, ID_RANKED_STATUS, ID_RANKED_CANCEL, ID_RANKED_RESULT, ID_RANKED_REGISTER,
              ID_KEY2_FIRST=420, ID_PLAYER2_ENABLED=450, ID_CONTROL_PLAYER1=451, ID_CONTROL_PLAYER2=452,
              ID_RANKED_ACCEPT=453, ID_RANKED_DECLINE=454, ID_CHALLENGE_TIMER=455, ID_STATUS_TIMER=456,
-             ID_COOLDOWN_TIMER=457, ID_CONSOLE_LOGS=458 };
-enum Tab { Home, Graphics, Performance, Game, Advanced, Controls, Online };
+             ID_COOLDOWN_TIMER=457, ID_CONSOLE_LOGS=458, ID_OVERLAY_GRAPH=459, ID_OVERLAY_POS=460, ID_NET_POS=461, ID_PAD_ASSIGNMENT=467, ID_NET_MODE=470, ID_NET_LOCAL_IP, ID_NET_PEER_IP, ID_NET_HUD, ID_NET_RECOVERY, ID_NET_REFRESH };
+enum Tab { Home, Graphics, Performance, Game, Advanced, Controls, Online, VpnLan };
 struct Settings {
     int mode = 0;
     int resolution = 0;
@@ -75,11 +76,16 @@ struct Settings {
     bool closeOnLaunch = true;
     std::array<bool,8> overlay{true,true,false,false,false,false,false,false};
     bool overlayEnabled = true;
+    bool overlayGraph = false;
+    int overlayPosition=0,netPosition=0;
     int overlayToggleKey = VK_F10;
     std::wstring saveRoot;
     std::array<int,24> keys{VK_UP,VK_DOWN,VK_LEFT,VK_RIGHT,'A','S','Z','X','Q','W','E','R','D','F',VK_RETURN,VK_BACK};
     std::array<int,24> keys2{'I','K','J','L','U','O','N','M','Y','H','7','8','5','6',VK_NUMPAD0,VK_DECIMAL};
     bool player2KeyboardEnabled = false;
+    int padAssignment = 1;
+    int netMode=0; bool netHud=true, netRecovery=true;
+    std::wstring netLocalIp,netPeerIps;
 };
 HWND g_window = nullptr;
 Tab g_tab = Home;
@@ -89,7 +95,7 @@ HBRUSH g_darkBrush = nullptr, g_panelBrush = nullptr;
 std::vector<HWND> g_page;
 struct PageItem { HWND hwnd; RECT bounds; int windowHeight; };
 std::vector<PageItem> g_pageItems;
-std::array<HWND,7> g_nav{};
+std::array<HWND,8> g_nav{};
 HWND g_status = nullptr, g_play = nullptr;
 HWND g_challengePanel = nullptr, g_challengeTitle = nullptr, g_challengeOpponent = nullptr;
 HWND g_challengeRating = nullptr, g_challengeDisconnect = nullptr, g_challengeTime = nullptr;
@@ -259,6 +265,9 @@ void LoadSettings() {
     const wchar_t* overlayKeys[8]{L"FPS",L"FrameTime",L"CPUUsage",L"GPUUsage",L"SystemRAM",L"GPUMemory",L"CPUTemperature",L"GPUTemperature"};
     for(int i=0;i<8;++i)g_settings.overlay[i]=IniInt(L"Overlay",overlayKeys[i],i<2?1:0,cfg.c_str())!=0;
     g_settings.overlayEnabled=IniInt(L"Overlay",L"Enabled",1,cfg.c_str())!=0;
+    g_settings.overlayGraph=IniInt(L"Overlay",L"Graph",0,cfg.c_str())!=0;
+    g_settings.overlayPosition=std::clamp(IniInt(L"Overlay",L"Position",0,cfg.c_str()),0,3);
+    g_settings.netPosition=std::clamp(IniInt(L"Netplay",L"HudPosition",3,cfg.c_str()),0,3);
     g_settings.overlayToggleKey=IniInt(L"Overlay",L"ToggleKey",VK_F10,cfg.c_str());
     wchar_t saveRoot[MAX_PATH]{};
     GetPrivateProfileStringW(L"Game", L"SaveRoot", L"", saveRoot, MAX_PATH, cfg.c_str());
@@ -266,6 +275,16 @@ void LoadSettings() {
     const wchar_t* keyNames[24]{L"Up",L"Down",L"Left",L"Right",L"A",L"B",L"X",L"Y",L"LB",L"RB",L"LT",L"RT",L"LS",L"RS",L"Start",L"Back",L"LSUp",L"LSDown",L"LSLeft",L"LSRight",L"RSUp",L"RSDown",L"RSLeft",L"RSRight"};
     for(int i=0;i<24;++i){g_settings.keys[i]=IniInt(L"Keyboard",keyNames[i],g_settings.keys[i],runtime);g_settings.keys2[i]=IniInt(L"Keyboard2",keyNames[i],g_settings.keys2[i],runtime);}
     g_settings.player2KeyboardEnabled=IniInt(L"Controls",L"Player2Keyboard",0,cfg.c_str())!=0;
+    g_settings.padAssignment=std::clamp(IniInt(L"Controls",L"PadAssignMode",1,cfg.c_str()),0,3);
+    g_settings.netMode=std::clamp(IniInt(L"Netplay",L"Mode",0,cfg),0,2);
+    g_settings.netHud=IniInt(L"Netplay",L"Hud",1,cfg)!=0;
+    g_settings.netRecovery=IniInt(L"Netplay",L"PacketRecovery",1,cfg)!=0;
+    wchar_t localIp[64]{},peerIps[512]{};
+    GetPrivateProfileStringW(L"Netplay",L"LocalIPv4",L"",localIp,64,cfg.c_str());
+    GetPrivateProfileStringW(L"Netplay",L"PeerIPv4",L"",peerIps,512,cfg.c_str());
+    g_settings.netLocalIp=localIp;g_settings.netPeerIps=peerIps;
+    // Drop settings left by the removed private-network discovery page.
+    WritePrivateProfileStringW(L"VPN", nullptr, nullptr, cfg.c_str());
 }
 void SaveSettings() {
     const auto runtime = RuntimeIni();
@@ -289,12 +308,19 @@ void SaveSettings() {
     put(L"Launcher",L"CloseOnLaunch",g_settings.closeOnLaunch);
     const wchar_t* overlayKeys[8]{L"FPS",L"FrameTime",L"CPUUsage",L"GPUUsage",L"SystemRAM",L"GPUMemory",L"CPUTemperature",L"GPUTemperature"};
     for(int i=0;i<8;++i){wchar_t value[2]{g_settings.overlay[i]?L'1':L'0',L'\0'};WritePrivateProfileStringW(L"Overlay",overlayKeys[i],value,cfg.c_str());}
-    put(L"Overlay",L"Enabled",g_settings.overlayEnabled);
+    put(L"Overlay",L"Enabled",g_settings.overlayEnabled);put(L"Overlay",L"Graph",g_settings.overlayGraph);
+    swprintf_s(number,L"%d",g_settings.overlayPosition);WritePrivateProfileStringW(L"Overlay",L"Position",number,cfg.c_str());
+    swprintf_s(number,L"%d",g_settings.netPosition);WritePrivateProfileStringW(L"Netplay",L"HudPosition",number,cfg.c_str());
     swprintf_s(number,L"%d",g_settings.overlayToggleKey);WritePrivateProfileStringW(L"Overlay",L"ToggleKey",number,cfg.c_str());
     WritePrivateProfileStringW(L"Game",L"SaveRoot",g_settings.saveRoot.c_str(),cfg.c_str());
     const wchar_t* keyNames[24]{L"Up",L"Down",L"Left",L"Right",L"A",L"B",L"X",L"Y",L"LB",L"RB",L"LT",L"RT",L"LS",L"RS",L"Start",L"Back",L"LSUp",L"LSDown",L"LSLeft",L"LSRight",L"RSUp",L"RSDown",L"RSLeft",L"RSRight"};
     for(int i=0;i<24;++i){swprintf_s(number,L"0x%02X",unsigned(g_settings.keys[i]));WritePrivateProfileStringW(L"Keyboard",keyNames[i],number,runtime.c_str());swprintf_s(number,L"0x%02X",unsigned(g_settings.keys2[i]));WritePrivateProfileStringW(L"Keyboard2",keyNames[i],number,runtime.c_str());}
+    swprintf_s(number,L"%d",g_settings.netMode);WritePrivateProfileStringW(L"Netplay",L"Mode",number,cfg.c_str());
+    put(L"Netplay",L"Hud",g_settings.netHud);put(L"Netplay",L"PacketRecovery",g_settings.netRecovery);
+    WritePrivateProfileStringW(L"Netplay",L"LocalIPv4",g_settings.netLocalIp.c_str(),cfg.c_str());
+    WritePrivateProfileStringW(L"Netplay",L"PeerIPv4",g_settings.netPeerIps.c_str(),cfg.c_str());
     put(L"Controls",L"Player2Keyboard",g_settings.player2KeyboardEnabled);
+    swprintf_s(number,L"%d",g_settings.padAssignment);WritePrivateProfileStringW(L"Controls",L"PadAssignMode",number,cfg.c_str());
 }
 std::wstring ControlText(int id) {
     HWND h=GetDlgItem(g_window,id);const int n=h?GetWindowTextLengthW(h):0;
@@ -691,6 +717,9 @@ void BuildPage() {
             const wchar_t* overlayNames[8]{L"Frames per second",L"Frame-time graph",L"CPU usage",L"GPU usage",L"System RAM",L"GPU memory",L"CPU temperature",L"GPU temperature"};
             const int columnWidth=(g_contentWidth-24)/2;
             for(int i=0;i<8;++i){const int col=i/4,row=i%4,x=g_contentX+2+col*(columnWidth+20),y=560+row*28;Add(ID_OVERLAY_FIRST+i,L"BUTTON",overlayNames[i],BS_OWNERDRAW|WS_TABSTOP,x,y,columnWidth,26);}
+        Check(ID_OVERLAY_GRAPH,L"Show frame-time graph",g_contentX+2,682,g_settings.overlayGraph,280);
+        Label(L"Overlay position",g_contentX+330,682,140,24);
+        Combo(ID_OVERLAY_POS,g_contentX+470,678,260,{L"Top left",L"Top right",L"Bottom left",L"Bottom right"},g_settings.overlayPosition);
         }
         break;
     }
@@ -699,12 +728,17 @@ void BuildPage() {
         Add(ID_CONTROL_PLAYER1,L"BUTTON",L"PLAYER 1",BS_OWNERDRAW|WS_TABSTOP,g_contentX+2,210,150,34);
         Add(ID_CONTROL_PLAYER2,L"BUTTON",L"PLAYER 2",BS_OWNERDRAW|WS_TABSTOP,g_contentX+162,210,150,34);
         Check(ID_PLAYER2_ENABLED,L"Enable Player 2 keyboard",g_contentX+340,214,g_settings.player2KeyboardEnabled);
-        SectionTitle(g_controlPlayer==0?L"PLAYER 1 BINDINGS":L"PLAYER 2 BINDINGS",258);
+        Label(L"Device assignment",g_contentX+2,258,150,26);
+        HWND assignment=Combo(ID_PAD_ASSIGNMENT,g_contentX+162,254,(std::min)(490,g_contentWidth-170),
+            {L"Auto (first active device is Player 1)",L"Keyboard Player 1 / Controller Player 2",
+             L"Controller Player 1 / Keyboard Player 2",L"Share Player 1"},g_settings.padAssignment);
+        if(assignment)SendMessageW(assignment,CB_SETCURSEL,g_settings.padAssignment,0);
+        SectionTitle(g_controlPlayer==0?L"PLAYER 1 BINDINGS":L"PLAYER 2 BINDINGS",294);
         {
             auto& map=g_controlPlayer==0?g_settings.keys:g_settings.keys2;
             for(int i=0;i<24;++i){
                 const int columnWidth=(g_contentWidth-24)/2;
-                const int col=i/12,row=i%12,x=g_contentX+2+col*(columnWidth+20),y=294+row*28;
+                const int col=i/12,row=i%12,x=g_contentX+2+col*(columnWidth+20),y=330+row*28;
                 Label(ControlNames[i],x+2,y+4,112,20);
                 const int id=(g_controlPlayer==0?ID_KEY_FIRST:ID_KEY2_FIRST)+i;
                 HWND key=Add(id,L"BUTTON",KeyName(map[i]).c_str(),BS_OWNERDRAW|WS_TABSTOP,x+118,y,(std::max)(180,columnWidth-130),26);
@@ -713,29 +747,50 @@ void BuildPage() {
         }
         break;
     }
+    case VpnLan: {
+        Heading(L"VPN LAN & OVERLAYS",L"Configure private network play and compact telemetry panels.");
+        SectionTitle(L"VIRTUAL LAN / VPN DIRECT PLAY",214);
+        Label(L"Network transport",g_contentX+2,251,170,24);
+        Combo(ID_NET_MODE,g_contentX+180,247,500,{L"Ranked coordinator",L"Virtual LAN / VPN (Radmin, Hamachi, Tailscale, LAN)",L"Offline / local only"},g_settings.netMode);
+        Label(L"Local IPv4 override",g_contentX+2,291,170,24);
+        Add(ID_NET_LOCAL_IP,L"EDIT",g_settings.netLocalIp.c_str(),WS_BORDER|ES_AUTOHSCROLL|WS_TABSTOP,g_contentX+180,287,260,28);
+        Add(ID_NET_REFRESH,L"BUTTON",L"REFRESH ADAPTERS",BS_PUSHBUTTON|WS_TABSTOP,g_contentX+458,287,175,28);
+        net::Adapter adapter;std::wstring detected=L"No active supported IPv4 interface found";
+        const auto overrideIp=Utf8(g_settings.netLocalIp);
+        if(net::SelectAdapter(adapter,overrideIp.c_str()))detected=L"Interface: "+FromUtf8(adapter.name)+L" - "+FromUtf8(adapter.ip)+L" (interface up; VPN membership is checked in its app)";
+        Label(detected.c_str(),g_contentX+180,320,g_contentWidth-190,38,true);
+        Label(L"Friend / Host IPv4",g_contentX+2,365,170,24);
+        Add(ID_NET_PEER_IP,L"EDIT",g_settings.netPeerIps.c_str(),WS_BORDER|ES_AUTOHSCROLL|WS_TABSTOP,g_contentX+180,361,600,28);
+        Label(L"Comma-separated IPv4 targets; optional :discovery-port. Blank uses broadcast. Leave local override blank to auto-detect.",g_contentX+180,394,g_contentWidth-190,40,true);
+        Check(ID_NET_RECOVERY,L"4-packet redundancy (small UDP datagrams)",g_contentX+2,441,g_settings.netRecovery,580);
+        Label(L"Netplay overlay position",g_contentX+2,510,190,24);
+        Combo(ID_NET_POS,g_contentX+200,506,280,{L"Top left",L"Top right",L"Bottom left",L"Bottom right"},g_settings.netPosition);
+        Check(ID_NET_HUD,L"Show Netplay telemetry overlay (F2)",g_contentX+2,548,g_settings.netHud,460);
+        break;
+    }
     case Online: {
-        Heading(L"RANKED SERVICE",L"Connect to a community matchmaking service. Queue reservations do not launch or connect the game yet.");
-        SectionTitle(L"SERVER AND ACCOUNT",214);
-        Label(L"Service URL",g_contentX+2,253,175,24);
-        Add(ID_RANKED_URL,L"EDIT",LoadRankedValue(L"Url",L"http://127.0.0.1:8765").c_str(),WS_BORDER|ES_AUTOHSCROLL|WS_TABSTOP,g_contentX+180,249,(std::min)(630,g_contentWidth-190),28);
-        Label(L"Account token",g_contentX+2,291,175,24);
+        Heading(L"ONLINE",L"Configure your ranked service account and find community matches.");
+        SectionTitle(L"RANKED SERVICE",520);
+        Label(L"Service URL",g_contentX+2,559,175,24);
+        Add(ID_RANKED_URL,L"EDIT",LoadRankedValue(L"Url",L"http://127.0.0.1:8765").c_str(),WS_BORDER|ES_AUTOHSCROLL|WS_TABSTOP,g_contentX+180,555,(std::min)(630,g_contentWidth-190),28);
+        Label(L"Account token",g_contentX+2,597,175,24);
         std::wstring secret=LoadRankedToken();
         const int tokenWidth=(std::max)(220,(std::min)(500,g_contentWidth-370));
-        Add(ID_RANKED_TOKEN,L"EDIT",secret.c_str(),WS_BORDER|ES_AUTOHSCROLL|ES_PASSWORD|WS_TABSTOP,g_contentX+180,287,tokenWidth,32);
-        Add(ID_RANKED_REGISTER,L"BUTTON",L"GENERATE TOKEN",BS_PUSHBUTTON|WS_TABSTOP,g_contentX+192+tokenWidth,287,160,32);
-        Label(L"Use the bearer token issued by the service administrator. It is saved encrypted for this Windows account.",g_contentX+180,319,(std::min)(680,g_contentWidth-190),40,true);
-        Label(L"Build",g_contentX+2,369,175,24);
-        Add(ID_RANKED_BUILD,L"EDIT",LoadRankedValue(L"Build",L"ttt2-community").c_str(),WS_BORDER|ES_AUTOHSCROLL|WS_TABSTOP,g_contentX+180,365,(std::min)(300,(g_contentWidth-210)/2),28);
-        Label(L"Region",g_contentX+500,369,75,24);
-        Add(ID_RANKED_REGION,L"EDIT",LoadRankedValue(L"Region",L"global").c_str(),WS_BORDER|ES_AUTOHSCROLL|WS_TABSTOP,g_contentX+575,365,(std::min)(235,(std::max)(120,g_contentWidth-585)),28);
-        SectionTitle(L"MATCHMAKING",420);
-        Add(ID_RANKED_HEALTH,L"BUTTON",L"CHECK SERVER",BS_PUSHBUTTON|WS_TABSTOP,g_contentX+2,462,145,34);
-        Add(ID_RANKED_PROFILE,L"BUTTON",L"MY PROFILE",BS_PUSHBUTTON|WS_TABSTOP,g_contentX+160,462,135,34);
-        Add(ID_RANKED_QUEUE,L"BUTTON",L"FIND RANKED",BS_PUSHBUTTON|WS_TABSTOP,g_contentX+308,462,145,34);
-        Add(ID_RANKED_STATUS,L"BUTTON",L"UPDATE STATUS",BS_PUSHBUTTON|WS_TABSTOP,g_contentX+466,462,145,34);
-        Add(ID_RANKED_CANCEL,L"BUTTON",L"CANCEL SEARCH",BS_PUSHBUTTON|WS_TABSTOP,g_contentX+624,462,155,34);
-        Label(L"Service responses (reservation secrets are hidden):",g_contentX+2,504,700,24,true);
-        Add(ID_RANKED_RESULT,L"EDIT",L"Server connection has not been checked.",WS_BORDER|ES_MULTILINE|ES_READONLY|ES_AUTOVSCROLL|WS_TABSTOP,g_contentX+2,532,(std::min)(810,g_contentWidth-4),92);
+        Add(ID_RANKED_TOKEN,L"EDIT",secret.c_str(),WS_BORDER|ES_AUTOHSCROLL|ES_PASSWORD|WS_TABSTOP,g_contentX+180,593,tokenWidth,32);
+        Add(ID_RANKED_REGISTER,L"BUTTON",L"GENERATE TOKEN",BS_PUSHBUTTON|WS_TABSTOP,g_contentX+192+tokenWidth,593,160,32);
+        Label(L"Token is saved encrypted for this Windows account.",g_contentX+180,626,(std::min)(680,g_contentWidth-190),26,true);
+        Label(L"Build",g_contentX+2,662,175,24);
+        Add(ID_RANKED_BUILD,L"EDIT",LoadRankedValue(L"Build",L"ttt2-community").c_str(),WS_BORDER|ES_AUTOHSCROLL|WS_TABSTOP,g_contentX+180,658,(std::min)(300,(g_contentWidth-210)/2),28);
+        Label(L"Region",g_contentX+500,662,75,24);
+        Add(ID_RANKED_REGION,L"EDIT",LoadRankedValue(L"Region",L"global").c_str(),WS_BORDER|ES_AUTOHSCROLL|WS_TABSTOP,g_contentX+575,658,(std::min)(235,(std::max)(120,g_contentWidth-585)),28);
+        SectionTitle(L"MATCHMAKING",706);
+        Add(ID_RANKED_HEALTH,L"BUTTON",L"CHECK SERVER",BS_PUSHBUTTON|WS_TABSTOP,g_contentX+2,748,145,34);
+        Add(ID_RANKED_PROFILE,L"BUTTON",L"MY PROFILE",BS_PUSHBUTTON|WS_TABSTOP,g_contentX+160,748,135,34);
+        Add(ID_RANKED_QUEUE,L"BUTTON",L"FIND RANKED",BS_PUSHBUTTON|WS_TABSTOP,g_contentX+308,748,145,34);
+        Add(ID_RANKED_STATUS,L"BUTTON",L"UPDATE STATUS",BS_PUSHBUTTON|WS_TABSTOP,g_contentX+466,748,145,34);
+        Add(ID_RANKED_CANCEL,L"BUTTON",L"CANCEL SEARCH",BS_PUSHBUTTON|WS_TABSTOP,g_contentX+624,748,155,34);
+        Label(L"Service responses (reservation secrets are hidden):",g_contentX+2,790,700,24,true);
+        Add(ID_RANKED_RESULT,L"EDIT",L"Server connection has not been checked.",WS_BORDER|ES_MULTILINE|ES_READONLY|ES_AUTOVSCROLL|WS_TABSTOP,g_contentX+2,818,(std::min)(810,g_contentWidth-4),120);
         break;
     }
     }
@@ -751,6 +806,12 @@ void ReadControls() {
     if(GetDlgItem(g_window,ID_INPUT_POLL_RATE)) {
         g_settings.inputPollRateHz=kInputPollRates[std::clamp(sel(ID_INPUT_POLL_RATE,3),0,static_cast<int>(kInputPollRates.size()-1))];
     }
+    if(GetDlgItem(g_window,ID_NET_POS))g_settings.netPosition=std::clamp(sel(ID_NET_POS,g_settings.netPosition),0,3);
+    if(GetDlgItem(g_window,ID_OVERLAY_POS))g_settings.overlayPosition=std::clamp(sel(ID_OVERLAY_POS,g_settings.overlayPosition),0,3);
+    if(GetDlgItem(g_window,ID_NET_MODE))g_settings.netMode=std::clamp(sel(ID_NET_MODE,g_settings.netMode),0,2);
+    if(GetDlgItem(g_window,ID_NET_LOCAL_IP))g_settings.netLocalIp=ControlText(ID_NET_LOCAL_IP);
+    if(GetDlgItem(g_window,ID_NET_PEER_IP))g_settings.netPeerIps=ControlText(ID_NET_PEER_IP);
+    if(GetDlgItem(g_window,ID_PAD_ASSIGNMENT)) g_settings.padAssignment=std::clamp(sel(ID_PAD_ASSIGNMENT,g_settings.padAssignment),0,3);
     if(HWND edit=GetDlgItem(g_window,ID_SAVE_PATH)){wchar_t path[MAX_PATH]{};GetWindowTextW(edit,path,MAX_PATH);g_settings.saveRoot=path;}
 }
 void SetEnv(const wchar_t* name,const wchar_t* value) { SetEnvironmentVariableW(name,value&&*value?value:nullptr); }
@@ -786,6 +847,12 @@ std::filesystem::path LatestBackup() {
 std::wstring Timestamp() { SYSTEMTIME t{};GetLocalTime(&t);wchar_t s[32]{};swprintf_s(s,L"%04u%02u%02u-%02u%02u%02u",t.wYear,t.wMonth,t.wDay,t.wHour,t.wMinute,t.wSecond);return s; }
 void LaunchGame(const std::string* confirmedReservation=nullptr) {
     ReadControls();SaveSettings();
+    if(!confirmedReservation&&g_settings.netMode==1){
+        net::Adapter adapter;const auto local=Utf8(g_settings.netLocalIp),peers=Utf8(g_settings.netPeerIps);
+        if(!net::SelectAdapter(adapter,local.c_str())||!net::ValidPeerTargets(peers.c_str())){
+            MessageBoxW(g_window,L"Select an active local IPv4 address (or leave it blank for automatic detection). Peer targets must be comma-separated IPv4 addresses, optionally followed by :discovery-port.",L"Check Virtual LAN settings",MB_ICONERROR|MB_OK);return;
+        }
+    }
     const std::wstring exe=InstallDir()+L"\\"+kGameExe;
     const std::wstring image=InstallDir()+L"\\game\\tekken.img";
     if(GetFileAttributesW(exe.c_str())==INVALID_FILE_ATTRIBUTES||GetFileAttributesW(image.c_str())==INVALID_FILE_ATTRIBUTES){
@@ -801,13 +868,20 @@ void LaunchGame(const std::string* confirmedReservation=nullptr) {
     env[L"TTT2_GPU_HW"]=g_settings.hardware?L"1":L"0";
     unsigned overlayMask=0;for(unsigned i=0;i<g_settings.overlay.size();++i)if(g_settings.overlay[i])overlayMask|=1u<<i;
     wchar_t overlayValue[24]{},hotkey[24]{};swprintf_s(overlayValue,L"%u",overlayMask);swprintf_s(hotkey,L"%d",g_settings.overlayToggleKey);
-    env[L"TTT2_OVERLAY_MASK"]=overlayValue;env[L"TTT2_FRAMETIME"]=g_settings.overlay[1]?L"1":L"";
+    env[L"TTT2_OVERLAY_MASK"]=overlayValue;env[L"TTT2_FRAMETIME"]=g_settings.overlay[1]?L"1":L"";env[L"TTT2_OVERLAY_GRAPH"]=g_settings.overlayGraph?L"1":L"0";
     env[L"TTT2_GPU_PROFILE"]=g_settings.drawDiagnostics?L"1":L"";
     env[L"TTT2_CONSOLE_LOGS"]=g_settings.consoleLogs?L"1":L"";
     env[L"TTT2_OVERLAY_ENABLED"]=g_settings.overlayEnabled?L"1":L"0";env[L"TTT2_OVERLAY_TOGGLE_KEY"]=hotkey;
     env[L"TTT2_SAVE_ROOT"]=g_settings.saveRoot;
+    env[L"TTT2_NET_HUD"]=g_settings.netHud?L"1":L"0";wchar_t np[8]{};swprintf_s(np,L"%d",g_settings.netPosition);env[L"TTT2_NET_HUD_POSITION"]=np;wchar_t op[8]{};swprintf_s(op,L"%d",g_settings.overlayPosition);env[L"TTT2_OVERLAY_POSITION"]=op;
+    env[L"TTT2_NET"]=g_settings.netMode==1?L"hamachi":g_settings.netMode==2?L"loopback":L"ipv4";
+    env[L"TTT2_LOCAL_IP"]=g_settings.netMode==1?g_settings.netLocalIp:L"";
+    env[L"TTT2_PEER_IP"]=g_settings.netMode==1?g_settings.netPeerIps:L"";
+    env[L"TTT2_NET_ROLLBACK"]=g_settings.netMode==1&&g_settings.netRecovery?L"1":L"0";
+
     for(const wchar_t* name:{L"TTT2_RANKED_RUNTIME",L"TTT2_RANKED_CONFIRMED",L"TTT2_RANKED_MATCH_ID",L"TTT2_RANKED_SESSION_KEY",L"TTT2_RANKED_ROLE",L"TTT2_RANKED_PEER_ENDPOINT",L"TTT2_RANKED_RELAY_ENDPOINT",L"TTT2_RANKED_RELAY_TOKEN",L"TTT2_RANKED_MATCH_TOKEN",L"TTT2_RANKED_PLAYER",L"TTT2_RANKED_PEER_ID"})env[name]=L"";
     if(confirmedReservation){
+        env[L"TTT2_NET"]=L"ipv4";env[L"TTT2_LOCAL_IP"]=L"";env[L"TTT2_PEER_IP"]=L"";env[L"TTT2_NET_ROLLBACK"]=L"0";
         std::string matchId=JsonField(*confirmedReservation,"match_id");if(matchId.empty())matchId=JsonField(*confirmedReservation,"id");
         std::string sessionKey=JsonField(*confirmedReservation,"session_key_bytes");if(sessionKey.empty())sessionKey=JsonField(*confirmedReservation,"session_key");
         const std::string role=JsonField(*confirmedReservation,"role"),endpoint=JsonField(*confirmedReservation,"opponent_endpoint");
@@ -860,8 +934,8 @@ LRESULT CALLBACK Proc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
         g_smallFont=CreateFontW(-13,0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH,L"Segoe UI");
         g_darkBrush=CreateSolidBrush(kBg);g_panelBrush=CreateSolidBrush(kPanel);
         LoadSettings();
-        const std::array<const wchar_t*,7> names{L"OVERVIEW",L"DISPLAY",L"PERFORMANCE",L"SAVES",L"CONTROLS",L"ONLINE",L"ABOUT"};
-        const std::array<int,7> ids{ID_HOME,ID_GRAPHICS,ID_PERFORMANCE,ID_GAME,ID_CONTROLS,ID_ONLINE,ID_ADVANCED};
+        const std::array<const wchar_t*,8> names{L"OVERVIEW",L"DISPLAY",L"PERFORMANCE",L"SAVES",L"CONTROLS",L"ONLINE",L"VPN LAN",L"ABOUT"};
+        const std::array<int,8> ids{ID_HOME,ID_GRAPHICS,ID_PERFORMANCE,ID_GAME,ID_CONTROLS,ID_ONLINE,ID_VPNLAN,ID_ADVANCED};
         for(size_t i=0;i<names.size();++i){g_nav[i]=CreateWindowExW(0,L"BUTTON",names[i],WS_CHILD|WS_VISIBLE|BS_OWNERDRAW|WS_TABSTOP,0,0,0,0,hwnd,(HMENU)(INT_PTR)ids[i],GetModuleHandleW(nullptr),nullptr);}
         g_status=CreateWindowExW(0,L"STATIC",L"Ready / settings are saved on this PC",WS_CHILD|WS_VISIBLE|SS_LEFT,34,0,520,26,hwnd,nullptr,GetModuleHandleW(nullptr),nullptr);
         SendMessageW(g_status,WM_SETFONT,(WPARAM)g_smallFont,TRUE);
@@ -872,7 +946,7 @@ LRESULT CALLBACK Proc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
     case WM_SIZE: {
         const int w=LOWORD(lp),h=HIWORD(lp),footer=h-kFooterHeight;
         UpdateContentGeometry(w);
-        const int navWidth=(w-68)/7;
+        const int navWidth=(w-68)/8;
         for(size_t i=0;i<g_nav.size();++i)MoveWindow(g_nav[i],34+int(i)*navWidth,80,navWidth-8,38,TRUE);
         MoveWindow(g_status,34,footer+24,460,26,TRUE);
         MoveWindow(GetDlgItem(hwnd,ID_SAVE),w-330,footer+18,120,38,TRUE);
@@ -972,8 +1046,8 @@ LRESULT CALLBACK Proc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
         const bool keyBinding=(id>=ID_KEY_FIRST&&id<ID_KEY_FIRST+24)||(id>=ID_KEY2_FIRST&&id<ID_KEY2_FIRST+24)||id==ID_OVERLAY_HOTKEY;
         if(keyBinding){const bool waiting=id==ID_OVERLAY_HOTKEY?g_capturingOverlayKey:g_capturingKey==((id>=ID_KEY2_FIRST)?id-ID_KEY2_FIRST:id-ID_KEY_FIRST);HBRUSH fill=CreateSolidBrush(waiting?RGB(53,47,43):kPanel);FillRect(d->hDC,&d->rcItem,fill);DeleteObject(fill);HPEN edge=CreatePen(PS_SOLID,(d->itemState&ODS_FOCUS)?2:1,waiting?kRed:kLine);HGDIOBJ oldPen=SelectObject(d->hDC,edge);HGDIOBJ oldBrush=SelectObject(d->hDC,GetStockObject(NULL_BRUSH));RoundRect(d->hDC,d->rcItem.left,d->rcItem.top,d->rcItem.right,d->rcItem.bottom,5,5);SelectObject(d->hDC,oldBrush);SelectObject(d->hDC,oldPen);DeleteObject(edge);RECT text=d->rcItem;text.left+=10;text.right-=28;SetBkMode(d->hDC,TRANSPARENT);SetTextColor(d->hDC,waiting?kRed:kCream);wchar_t value[80]{};GetWindowTextW(d->hwndItem,value,80);DrawTextW(d->hDC,value,-1,&text,DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS);const int cx=d->rcItem.right-15,cy=(d->rcItem.top+d->rcItem.bottom)/2;HPEN glyph=CreatePen(PS_SOLID,2,kMuted);oldPen=SelectObject(d->hDC,glyph);MoveToEx(d->hDC,cx-3,cy-4,nullptr);LineTo(d->hDC,cx+1,cy);LineTo(d->hDC,cx-3,cy+4);SelectObject(d->hDC,oldPen);DeleteObject(glyph);return TRUE;}
         const bool overlayCheck=id>=ID_OVERLAY_FIRST&&id<ID_OVERLAY_FIRST+8;
-        const bool checkbox=id==ID_ASYNC||id==ID_WARM||id==ID_FAST||id==ID_DRAW_DIAGNOSTICS||id==ID_CONSOLE_LOGS||id==ID_HARDWARE||id==ID_CLOSE_ON_LAUNCH||id==ID_PLAYER2_ENABLED||id==ID_OVERLAY_ENABLE||overlayCheck;
-        if(checkbox){const bool checked=id==ID_PLAYER2_ENABLED?g_settings.player2KeyboardEnabled:id==ID_OVERLAY_ENABLE?g_settings.overlayEnabled:overlayCheck?g_settings.overlay[id-ID_OVERLAY_FIRST]:id==ID_ASYNC?g_settings.asyncShaders:id==ID_WARM?g_settings.warmShaders:id==ID_FAST?g_settings.fastShaders:id==ID_DRAW_DIAGNOSTICS?g_settings.drawDiagnostics:id==ID_CONSOLE_LOGS?g_settings.consoleLogs:id==ID_HARDWARE?g_settings.hardware:g_settings.closeOnLaunch;FillRect(d->hDC,&d->rcItem,g_darkBrush);RECT box{d->rcItem.left,d->rcItem.top+6,d->rcItem.left+16,d->rcItem.top+22};HBRUSH b=CreateSolidBrush(checked?kRed:kPanel);FillRect(d->hDC,&box,b);DeleteObject(b);HBRUSH edge=CreateSolidBrush(kLine);FrameRect(d->hDC,&box,edge);DeleteObject(edge);if(checked){HPEN p=CreatePen(PS_SOLID,2,kCream);auto old=(HPEN)SelectObject(d->hDC,p);MoveToEx(d->hDC,box.left+3,box.top+8,nullptr);LineTo(d->hDC,box.left+7,box.top+12);LineTo(d->hDC,box.left+13,box.top+4);SelectObject(d->hDC,old);DeleteObject(p);}RECT tx=d->rcItem;tx.left+=25;SetBkMode(d->hDC,TRANSPARENT);SetTextColor(d->hDC,kCream);wchar_t label[128]{};GetWindowTextW(d->hwndItem,label,128);DrawTextW(d->hDC,label,-1,&tx,DT_LEFT|DT_VCENTER|DT_SINGLELINE);return TRUE;}
+        const bool checkbox=id==ID_ASYNC||id==ID_WARM||id==ID_FAST||id==ID_DRAW_DIAGNOSTICS||id==ID_CONSOLE_LOGS||id==ID_HARDWARE||id==ID_CLOSE_ON_LAUNCH||id==ID_PLAYER2_ENABLED||id==ID_OVERLAY_ENABLE||id==ID_NET_HUD||id==ID_NET_RECOVERY||id==ID_OVERLAY_GRAPH||overlayCheck;
+        if(checkbox){const bool checked=id==ID_NET_HUD?g_settings.netHud:id==ID_NET_RECOVERY?g_settings.netRecovery:id==ID_OVERLAY_GRAPH?g_settings.overlayGraph:id==ID_PLAYER2_ENABLED?g_settings.player2KeyboardEnabled:id==ID_OVERLAY_ENABLE?g_settings.overlayEnabled:overlayCheck?g_settings.overlay[id-ID_OVERLAY_FIRST]:id==ID_ASYNC?g_settings.asyncShaders:id==ID_WARM?g_settings.warmShaders:id==ID_FAST?g_settings.fastShaders:id==ID_DRAW_DIAGNOSTICS?g_settings.drawDiagnostics:id==ID_CONSOLE_LOGS?g_settings.consoleLogs:id==ID_HARDWARE?g_settings.hardware:g_settings.closeOnLaunch;FillRect(d->hDC,&d->rcItem,g_darkBrush);RECT box{d->rcItem.left,d->rcItem.top+6,d->rcItem.left+16,d->rcItem.top+22};HBRUSH b=CreateSolidBrush(checked?kRed:kPanel);FillRect(d->hDC,&box,b);DeleteObject(b);HBRUSH edge=CreateSolidBrush(kLine);FrameRect(d->hDC,&box,edge);DeleteObject(edge);if(checked){HPEN p=CreatePen(PS_SOLID,2,kCream);auto old=(HPEN)SelectObject(d->hDC,p);MoveToEx(d->hDC,box.left+3,box.top+8,nullptr);LineTo(d->hDC,box.left+7,box.top+12);LineTo(d->hDC,box.left+13,box.top+4);SelectObject(d->hDC,old);DeleteObject(p);}RECT tx=d->rcItem;tx.left+=25;SetBkMode(d->hDC,TRANSPARENT);SetTextColor(d->hDC,kCream);wchar_t label[128]{};GetWindowTextW(d->hwndItem,label,128);DrawTextW(d->hDC,label,-1,&tx,DT_LEFT|DT_VCENTER|DT_SINGLELINE);return TRUE;}
         int pageIndex=-1;switch(id){case ID_HOME:pageIndex=0;break;case ID_GRAPHICS:pageIndex=1;break;case ID_PERFORMANCE:pageIndex=2;break;case ID_GAME:pageIndex=3;break;case ID_ADVANCED:pageIndex=4;break;case ID_CONTROLS:pageIndex=5;break;case ID_ONLINE:pageIndex=6;break;}const bool active=pageIndex>=0&&int(g_tab)==pageIndex;
         const bool play=id==ID_PLAY;const bool challengeAccept=id==ID_RANKED_ACCEPT;const bool challengeDecline=id==ID_RANKED_DECLINE;const bool controlTab=id==ID_CONTROL_PLAYER1||id==ID_CONTROL_PLAYER2;const bool selectedControl=id==ID_CONTROL_PLAYER1?g_controlPlayer==0:id==ID_CONTROL_PLAYER2&&g_controlPlayer==1;const bool primary=play||challengeAccept;const COLORREF fill=challengeAccept?RGB(39,119,95):((active||(controlTab&&selectedControl))?RGB(47,34,39):kPanel);HBRUSH brush=CreateSolidBrush(fill);
         HPEN p=CreatePen(PS_SOLID,1,primary?kRed:kLine);auto oldPen=(HPEN)SelectObject(d->hDC,p);auto oldBrush=(HBRUSH)SelectObject(d->hDC,brush);RoundRect(d->hDC,d->rcItem.left,d->rcItem.top,d->rcItem.right,d->rcItem.bottom,8,8);SelectObject(d->hDC,oldBrush);SelectObject(d->hDC,oldPen);DeleteObject(p);DeleteObject(brush);
@@ -984,11 +1058,16 @@ LRESULT CALLBACK Proc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
     }
     case WM_COMMAND: {
         const int id=LOWORD(wp);
-        if(id>=ID_HOME&&id<=ID_ONLINE){ReadControls();if(g_tab==Online)SaveRankedSettings();g_tab=(Tab)(id-ID_HOME);g_scrollOffset=0;for(size_t i=0;i<g_nav.size();++i)InvalidateRect(g_nav[i],nullptr,TRUE);BuildPage();return 0;}
+        if(id>=ID_HOME&&id<=ID_VPNLAN){ReadControls();if(g_tab==Online)SaveRankedSettings();g_tab=(Tab)(id-ID_HOME);g_scrollOffset=0;for(size_t i=0;i<g_nav.size();++i)InvalidateRect(g_nav[i],nullptr,TRUE);BuildPage();return 0;}
         if(id==ID_SAVE){ReadControls();SaveSettings();if(g_tab==Online)SaveRankedSettings();SetWindowTextW(g_status,L"Settings saved");return 0;}
         if(id==ID_PLAY){LaunchGame();return 0;}
+        if(id==ID_NET_HUD||id==ID_NET_RECOVERY||id==ID_OVERLAY_GRAPH){if(id==ID_NET_HUD)g_settings.netHud=!g_settings.netHud;else if(id==ID_NET_RECOVERY)g_settings.netRecovery=!g_settings.netRecovery;else g_settings.overlayGraph=!g_settings.overlayGraph;InvalidateRect(GetDlgItem(hwnd,id),nullptr,TRUE);return 0;}
+        if(id==ID_NET_REFRESH){ReadControls();BuildPage();return 0;}
+        if(id==ID_NET_MODE&&HIWORD(wp)==CBN_SELCHANGE){ReadControls();return 0;}
+
         if(id==ID_CONTROL_PLAYER1||id==ID_CONTROL_PLAYER2){g_capturingKey=-1;g_controlPlayer=id==ID_CONTROL_PLAYER1?0:1;g_scrollOffset=0;BuildPage();return 0;}
         if(id==ID_PLAYER2_ENABLED){g_settings.player2KeyboardEnabled=!g_settings.player2KeyboardEnabled;InvalidateRect(GetDlgItem(hwnd,id),nullptr,TRUE);return 0;}
+        if(id==ID_PAD_ASSIGNMENT&&HIWORD(wp)==CBN_SELCHANGE){g_settings.padAssignment=std::clamp(int(SendMessageW(GetDlgItem(hwnd,id),CB_GETCURSEL,0,0)),0,3);SetWindowTextW(g_status,L"Device assignment changed. Save before launching.");return 0;}
         if(id==ID_OVERLAY_ENABLE){g_settings.overlayEnabled=!g_settings.overlayEnabled;InvalidateRect(GetDlgItem(hwnd,id),nullptr,TRUE);return 0;}
         if(id==ID_OVERLAY_HOTKEY){g_capturingOverlayKey=true;SetWindowTextW(GetDlgItem(hwnd,id),L"PRESS A KEY...");SetFocus(GetDlgItem(hwnd,id));InvalidateRect(GetDlgItem(hwnd,id),nullptr,TRUE);SetWindowTextW(g_status,L"Press a key to toggle the performance overlay. Escape cancels.");return 0;}
         if((id>=ID_KEY_FIRST&&id<ID_KEY_FIRST+24)||(id>=ID_KEY2_FIRST&&id<ID_KEY2_FIRST+24)){g_controlPlayer=id>=ID_KEY2_FIRST?1:0;g_capturingKey=id-(g_controlPlayer?ID_KEY2_FIRST:ID_KEY_FIRST);SetWindowTextW(GetDlgItem(hwnd,id),L"PRESS A KEY...");SetFocus(GetDlgItem(hwnd,id));InvalidateRect(GetDlgItem(hwnd,id),nullptr,TRUE);SetWindowTextW(g_status,L"Press a key for this binding. Escape is reserved.");return 0;}

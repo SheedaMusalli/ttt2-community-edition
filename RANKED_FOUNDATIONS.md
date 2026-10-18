@@ -495,3 +495,72 @@ against a temporary profile save root. The test passes under the installed
 Clang-CL/v143 toolchain. A Release runtime and installer were rebuilt with this
 setting enabled; fresh profiles store data under
 `%LOCALAPPDATA%\TTT2Recomp\saves\<profile XUID>`.
+
+### Virtual LAN transport and Netplay HUD (2026-10-18)
+
+The replacement transport binds IPv4/ENet and UDP discovery to an active VPN/LAN
+adapter. ONLINE offers a Virtual LAN / VPN mode, optional active local IPv4 override,
+comma-separated peer targets (optionally IP:discovery-port), four-packet recovery and
+HUD checkbox. PERFORMANCE also exposes the HUD toggle. F2 toggles it during play.
+Settings use [Netplay]; obsolete [VPN] settings are discarded.
+
+GetAdaptersAddresses selects the explicit local address, then Hamachi, Radmin,
+Tailscale, other named VPN interfaces and LAN. Interface-up status does not prove VPN
+membership or provider connectivity. Join the same private network in the VPN app.
+The launcher does not install, authenticate or control VPN applications. Invalid local
+addresses and malformed peer targets are rejected instead of falling back silently.
+
+Create Player Match on the host and search Player Match on the client. If provider
+broadcast does not work, enter the host VPN IPv4 on the client. Allow the game through
+Windows Firewall for UDP discovery (29876 by default) and its logged ENet game port.
+Discovery fans out to every explicit target plus subnet/global broadcast. A second
+local instance uses the next free discovery port; use the host's logged IP:PORT on
+the client. Records expire after four seconds; withdrawal removes closed sessions.
+Per-endpoint peer IDs and distinct local sign-in identities prevent same-PC aliasing.
+The retired World Tekken Federation service is separate and is not restored here.
+
+Environment: TTT2_NET=hamachi (or lan), TTT2_LOCAL_IP, TTT2_PEER_IP,
+TTT2_DISCOVERY_PORT, TTT2_NET_ROLLBACK=1 and TTT2_NET_HUD=1. Runtime --local-ip= and
+--peer-ip= switches are also accepted. Confirmed ranked reservations use the separate
+coordinator transport. Both LAN peers need this build; the protocol is unauthenticated
+and intended for trusted private networks.
+
+Small datagrams (at most 512 bytes) use a versioned, network-order TRBK envelope with
+four consecutive opaque packets, epoch/sequence metadata and 16-bit QPC timestamp/echo
+fields. The decoder validates lengths before changing state, recovers up to three
+missing packets in order, suppresses duplicates/reordering and counts gaps beyond the
+window. Larger datagrams, stream/control messages and discovery beacons are untouched.
+VDP bytes remain opaque: no unverified two-byte prefix is stripped.
+
+The bounded lock-free atomic telemetry collector reports adapter, endpoint, measured
+smoothed echo RTT/jitter, packet recovery/loss totals and 120 history samples. The native
+D3D11 HUD composites a persistent texture from a cached GDI text/graph surface, refreshed
+at most 60 times per second, below the performance panel or at top right. Green means
+low RTT, amber recovery/high RTT and red a gap beyond the window. SYNCED means valid
+transport delivery, not deterministic simulation synchronization. RTT stays N/A before
+an echo arrives. Counters are labelled as packets rather than fabricated game frames.
+
+Packet recovery is not deterministic simulation rollback. There is no verified guest
+frame-input schema or deterministic state save/restore hook. ReportSimulationSync is
+an integration hook without a connected simulation-tick source; Frame-Rift shows N/A
+and the pacing function adds no artificial sleep until a verified tick source calls it.
+Simulation rollback and frame-rift pacing therefore remain incomplete.
+
+Verification covers the Release runtime/launcher, packet loss/recovery, deduplication,
+malformed input, stream epochs, payload bounds, timestamp rollover, concurrent telemetry,
+a rendered HUD fixture and two independent processes exchanging session beacons, actual
+ENet messages, broadcast datagrams and session withdrawal. Existing XNet route and
+ranked integration tests pass. These tests do not certify native in-game sessions on
+two physical PCs or any VPN provider. Actual gameplay and frame-time profiling remain
+necessary; zero frame-time impact is not claimed.
+
+The current runtime does not expose verified attack startup, hit/block stun, frame advantage, or a
+reliable game-mode gate for practice versus live online rounds. It also has no verified hook for
+the end-of-match rematch transition. Therefore Tekken 8-style frame data panels and the requested
+online post-match action menu remain unimplemented; `XSessionWriteStats` is still treated as an
+opaque diagnostic payload rather than decoded using invented fields.
+
+
+### v2.3.0 release update (2026-10-18)
+
+Launcher settings now put Virtual LAN transport on its own VPN LAN tab. The performance overlay is narrower, its graph has an independent setting, and both overlays can be positioned in a selected screen corner. The runtime and installer version metadata is v2.3.0. The release package includes the installer and TU3. VPN multiplayer remains experimental; the release does not claim two-PC gameplay verification or deterministic game-simulation rollback.

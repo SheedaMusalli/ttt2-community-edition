@@ -60,6 +60,30 @@ game licenses. The ranked-service panel uses its own bearer token; remote server
 HTTPS. The local default URL is http://127.0.0.1:8765.
 
 
+VIRTUAL LAN / VPN AND NETPLAY HUD
+--------------------------------
+In ONLINE select Virtual LAN / VPN. Both PCs need this build and must join the same
+private network in Radmin, Hamachi or another supported VPN. Local IPv4 can override
+automatic interface selection. Interface-up does not prove VPN membership: confirm
+that in the VPN app. The launcher does not control the VPN app.
+
+Create Player Match on the host and search Player Match on the client. If broadcasts
+find nothing, enter the host VPN IPv4 in Peer targets on the client. Multiple targets
+are comma-separated. Allow game UDP traffic through Windows Firewall. Discovery uses
+29876 by default; a second local instance uses the next free port. For another port,
+enter the host's logged IP:PORT as the client peer target.
+
+Enable Show Netplay & Packet Recovery Overlay in ONLINE or PERFORMANCE. F2 toggles it.
+It displays measured echo RTT/jitter and recovered/lost packet totals with a 120-sample
+graph. RTT stays N/A until an echo arrives. Four-packet redundancy reconstructs up to
+three missing small UDP datagrams. It is not deterministic simulation rollback.
+Frame-Rift stays N/A until a verified simulation-tick source is connected; no guessed
+frame pacing is applied. The retired World Tekken Federation service is not restored.
+
+Experimental: automated two-process discovery and ENet tests pass. Native in-game
+matchmaking and gameplay across two physical PCs remain unverified.
+
+
 UNINSTALLING
 ------------
 Settings > Apps > Installed apps > "Tekken Tag Tournament 2 (PC port)", or run uninstall.exe in

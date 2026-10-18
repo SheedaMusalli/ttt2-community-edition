@@ -17,7 +17,7 @@ namespace {
 constexpr auto kTimeout = std::chrono::seconds(35);
 std::string g_connectToken, g_sessionKey, g_expectedPlayer, g_localPlayer;
 std::atomic<bool> g_authenticated{ false };
-std::atomic<unsigned> g_replies{ 0 };
+std::atomic<unsigned> g_replies{ 0 }, g_pingsReplied{ 0 };
 
 std::wstring Widen(const std::string& value)
 {
@@ -110,7 +110,7 @@ void Receiver(uint64_t peer, net::Channel channel, const uint8_t* data, size_t s
     if (message.rfind("P|", 0) == 0)
     {
         const std::string reply = "R|" + message.substr(2);
-        static_cast<void>(net::Send(peer, net::Channel::Unreliable, reply.data(), reply.size()));
+        if (net::Send(peer, net::Channel::Unreliable, reply.data(), reply.size())) ++g_pingsReplied;
     }
     else if (message.rfind("R|", 0) == 0) ++g_replies;
 }
@@ -180,7 +180,12 @@ int Client(const char* base, const char* token, const char* player, uint16_t por
         if (!net::Send(peer, net::Channel::Unreliable, ping.data(), ping.size())) return 18;
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
-    if (!WaitUntil([] { return g_replies.load() >= 20; }, deadline)) return 19;
+    // Stay alive until both clients have received their replies; exiting after only
+    // our own replies can strand the peer before its last ping has been answered.
+    if (!WaitUntil([] { return g_replies.load() >= 20 && g_pingsReplied.load() >= 20; }, deadline)) {
+        std::fprintf(stderr, "%s: exchange timed out (received=%u, answered=%u)\n", player, g_replies.load(), g_pingsReplied.load());
+        return 19;
+    }
     std::printf("%s: reservation, ENet reliable handshake and 20 bidirectional UDP-channel replies passed\n", player);
     return 0;
 }
@@ -202,7 +207,7 @@ int ConfirmedClient(uint16_t port)
     while(!g_authenticated.load()&&std::chrono::steady_clock::now()<deadline){static_cast<void>(net::Send(peer,net::Channel::Reliable,handshake.data(),handshake.size()));std::this_thread::sleep_for(std::chrono::milliseconds(50));}
     if(!g_authenticated.load())return 33;
     for(unsigned i=0;i<20;++i){const std::string ping="P|confirmed|"+std::to_string(i);if(!net::Send(peer,net::Channel::Unreliable,ping.data(),ping.size()))return 34;std::this_thread::sleep_for(std::chrono::milliseconds(20));}
-    if(!WaitUntil([]{return g_replies.load()>=20;},deadline))return 35;
+    if(!WaitUntil([]{return g_replies.load()>=20 && g_pingsReplied.load()>=20;},deadline))return 35;
     std::printf("%s: pre-confirmed runtime adapter registered peer; no queue request; ENet exchange passed\n",player);return 0;
 }
 

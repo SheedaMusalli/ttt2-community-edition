@@ -22,10 +22,11 @@ namespace performance_overlay
 namespace
 {
 constexpr char kClassName[] = "TTT2PerformanceOverlay";
-constexpr int kWidth = 420;
-constexpr int kRowHeight = 22;
+constexpr int kWidth = 320;
+constexpr int kRowHeight = 18;
 std::atomic<uint64_t> g_presents{0};
 std::atomic<bool> g_started{false};
+std::atomic<int> g_visibleBottom{0};
 std::array<std::atomic<double>, 36> g_frameSamples{};
 
 enum Metric : unsigned
@@ -187,7 +188,9 @@ LRESULT CALLBACK OverlayProc(HWND window, UINT message, WPARAM wParam, LPARAM lP
             if (metrics & FrameTime)
             {
                 wchar_t v[32]{}; swprintf_s(v, L"%.2f ms", snapshot->frameMs); Text(dc, 12, y, L"Frame time", v); y += kRowHeight;
-                const int graphTop = y, graphHeight = 54, graphLeft = 12, graphWidth = kWidth - 24;
+                const char* graphSetting=std::getenv("TTT2_OVERLAY_GRAPH");
+                if(graphSetting&&std::strcmp(graphSetting,"1")==0){
+                const int graphTop = y, graphHeight = 42, graphLeft = 12, graphWidth = kWidth - 24;
                 HBRUSH graphBg = CreateSolidBrush(RGB(22, 30, 40));
                 RECT graph{graphLeft,graphTop,graphLeft+graphWidth,graphTop+graphHeight};
                 FillRect(dc,&graph,graphBg); DeleteObject(graphBg);
@@ -203,7 +206,8 @@ LRESULT CALLBACK OverlayProc(HWND window, UINT message, WPARAM wParam, LPARAM lP
                     if(i==0) MoveToEx(dc,x,py,nullptr); else LineTo(dc,x,py);
                 }
                 SelectObject(dc,oldPen); DeleteObject(pen);
-                y += graphHeight + 8;
+                y += graphHeight + 5;
+                }
             }
             if (metrics & MetricCpuUsage) { const auto v=Percent(snapshot->cpu)+L" / "+Percent(snapshot->cpuCore); Text(dc,12,y,L"CPU total / core",v); y+=kRowHeight; }
             if (metrics & MetricGpuUsage) { const auto v=Percent(snapshot->gpu); Text(dc,12,y,L"GPU usage",v); y+=kRowHeight; }
@@ -253,7 +257,9 @@ void Run(HWND gameWindow)
                      ((metrics & SystemRam) ? 1 : 0) + ((metrics & GpuMemory) ? 1 : 0) +
                      ((metrics & CpuTemperature) ? 1 : 0) + ((metrics & GpuTemperature) ? 1 : 0) +
                      ((metrics & Fps) ? 1 : 0) + ((metrics & FrameTime) ? 2 : 0);
-    const int height = 48 + rows * kRowHeight + ((metrics & FrameTime) ? 62 : 0);
+    const char* graphSetting=std::getenv("TTT2_OVERLAY_GRAPH");
+    const bool showGraph=(metrics&FrameTime)&&graphSetting&&std::strcmp(graphSetting,"1")==0;
+    const int height = 38 + rows * kRowHeight + (showGraph ? 47 : 0);
     HWND overlay = CreateWindowExW(WS_EX_TOPMOST|WS_EX_TRANSPARENT|WS_EX_NOACTIVATE|WS_EX_LAYERED,
         wc.lpszClassName,L"TTT2 Performance Overlay",WS_POPUP,0,0,kWidth,height,nullptr,nullptr,wc.hInstance,nullptr);
     if (!overlay) return;
@@ -276,9 +282,12 @@ void Run(HWND gameWindow)
         if(toggleDown&&!previousToggleDown)userVisible=!userVisible;
         previousToggleDown=toggleDown;
         const bool visible=userVisible&&IsWindowVisible(gameWindow)&&!IsIconic(gameWindow)&&GetForegroundWindow()==gameWindow;
+        int overlayPosition=0;if(const char* value=std::getenv("TTT2_OVERLAY_POSITION"))overlayPosition=std::clamp(std::atoi(value),0,3);
+        g_visibleBottom.store(visible&&overlayPosition<2?12+height:0,std::memory_order_relaxed);
         if(visible)
         {
-            RECT r{};GetClientRect(gameWindow,&r);POINT p{12,46};ClientToScreen(gameWindow,&p);
+            RECT r{};GetClientRect(gameWindow,&r);int position=overlayPosition;
+            POINT p{position%2?std::max(0L,r.right-kWidth-12):12,position>=2?std::max(0L,r.bottom-height-12):12};ClientToScreen(gameWindow,&p);
             SetWindowPos(overlay,HWND_TOPMOST,p.x,p.y,kWidth,height,SWP_NOACTIVATE|SWP_SHOWWINDOW);
             const auto now=std::chrono::steady_clock::now();
             if(now>=nextSample){Sample(snapshot,metrics,query,counter,previousCpu,cpuTime,previousPresents,frameTime);
@@ -314,6 +323,8 @@ void NotifyPresent()
     previous = now;
     g_presents.fetch_add(1,std::memory_order_relaxed);
 }
+
+int VisibleBottom(){return g_visibleBottom.load(std::memory_order_relaxed);}
 
 uint64_t PresentedFrameCount()
 {

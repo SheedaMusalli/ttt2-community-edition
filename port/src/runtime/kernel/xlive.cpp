@@ -26,6 +26,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cwctype>
+#include <iterator>
+#include "../net/net_adapter.h"
+#include "../net/virtual_lan.h"
+#include <array>
 #include <map>
 #include <mutex>
 #include <set>
@@ -72,6 +77,8 @@ struct PeerTable
     std::mutex m;
     std::map<uint64_t, uint32_t> addrOf;      // peer id -> virtual address (host order)
     std::map<uint32_t, uint64_t> peerOf;
+    std::map<uint32_t,std::array<uint8_t,0x24>> xnaddr;
+    std::map<uint32_t,uint64_t> keyOf;
     uint32_t next = 1;
 } g_peers;
 
@@ -146,9 +153,32 @@ uint64_t PeerOfAddr(uint32_t addr)
 
 uint64_t OnlineXuid()
 {
-    // Online XUIDs are 0x0009xxxxxxxxxxxx: here unique per machine (the peer id) and profile.
+    // Local peer IDs are usually just the configured UDP port, so they collide across PCs.
+    // Mix the Windows machine GUID with the signed-in profile to give each machine/profile a
+    // stable online identity for session discovery without contacting Xbox Live.
     if (!profiles::SignedIn()) return 0;
-    const uint64_t mix = LocalPeerId() * 0x9E3779B97F4A7C15ull ^ profiles::ActiveXuid();
+    static const uint64_t machineHash = [] {
+        wchar_t identity[128]{};
+        DWORD bytes = sizeof(identity);
+        LONG status = RegGetValueW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\Cryptography", L"MachineGuid",
+                                   RRF_RT_REG_SZ, nullptr, identity, &bytes);
+        if (status != ERROR_SUCCESS || !identity[0]) {
+            DWORD chars = static_cast<DWORD>(std::size(identity));
+            if (!GetComputerNameW(identity, &chars)) wcscpy_s(identity, L"TTT2-PC");
+        }
+        uint64_t hash = 1469598103934665603ull;
+        for (const wchar_t* c = identity; *c; ++c) {
+            const uint16_t value = static_cast<uint16_t>(std::towlower(*c));
+            hash = (hash ^ uint8_t(value)) * 1099511628211ull;
+            hash = (hash ^ uint8_t(value >> 8)) * 1099511628211ull;
+        }
+        return hash;
+    }();
+    uint64_t mix = machineHash ^ profiles::ActiveXuid() ^ 0x9E3779B97F4A7C15ull;
+    if(net::VirtualLanEnabled())mix^=LocalPeerId(); // simultaneous local instances need distinct room identities
+    mix ^= mix >> 30; mix *= 0xBF58476D1CE4E5B9ull;
+    mix ^= mix >> 27; mix *= 0x94D049BB133111EBull;
+    mix ^= mix >> 31;
     return 0x0009000000000000ull | (mix & 0x0000FFFFFFFFFFFFull);
 }
 
@@ -156,10 +186,10 @@ void WriteOwnXnAddr(uint8_t* base, uint32_t a)
 {
     std::memset(base + a, 0, 0x24);
     const uint64_t peer = LocalPeerId();
-    const uint32_t ina = OwnAddr(peer);                                // our own address: 10.77.x.y
+    const uint32_t ina = net::LocalIPv4()?net::LocalIPv4():OwnAddr(peer);                                // our own address: 10.77.x.y
     GWrite32(base, a + 0x00, ina);                                     // ina (network order)
     GWrite32(base, a + 0x04, ina);                                     // inaOnline
-    GWrite16(base, a + 0x08, 3074);                                    // wPortOnline
+    GWrite16(base, a + 0x08, net::ListenPort()?net::ListenPort():3074);                                    // wPortOnline
     for (int i = 0; i < 6; ++i) GWrite8(base, a + 0x0A + i, uint8_t(peer >> (8 * i)) | (i == 0 ? 0x02 : 0));
     Write64(base, a + 0x18, peer);                                     // abOnline: our peer id
     GWrite8(base, a + 0x20, 1);                                        // platform: Xbox 360
@@ -257,10 +287,26 @@ PPC_FUNC(__imp__NetDll_XNetXnAddrToInAddr)
     if (!xna || !out) { ctx.r3.u64 = 10022; return; }      // WSAEINVAL
     const uint64_t peer = Read64(base, xna + 0x18);
     const uint32_t ina = (!peer || peer == xlive::LocalPeerId()) ? 0x7F000001u : xlive::AddrOfPeer(peer);
+    if(peer && peer!=net::LocalPeer() && net::VirtualLanEnabled()){
+        const uint32_t realIp=GRead32(base,xna+4)?GRead32(base,xna+4):GRead32(base,xna);
+        char ip[32]{};std::snprintf(ip,sizeof(ip),"%u.%u.%u.%u",realIp>>24,(realIp>>16)&255,(realIp>>8)&255,realIp&255);
+        const auto port=GRead16(base,xna+8);if(realIp&&port)net::RegisterPeer(peer,ip,port);
+    }
+    {std::lock_guard l(g_peers.m);auto& saved=g_peers.xnaddr[ina];std::memcpy(saved.data(),base+xna,saved.size());if(ctx.r5.u32)g_peers.keyOf[ina]=Read64(base,ctx.r5.u32);}
     GWrite32(base, out, ina);
     Trace("xnaddr2inaddr", "XNetXnAddrToInAddr(peer %016llX) -> %u.%u.%u.%u", (unsigned long long)peer,
           ina >> 24, (ina >> 16) & 0xFF, (ina >> 8) & 0xFF, ina & 0xFF);
     ctx.r3.u64 = 0;
+}
+
+
+PPC_FUNC(__imp__NetDll_XNetInAddrToXnAddr)
+{
+    const auto addr=ctx.r4.u32,xna=ctx.r5.u32,kid=ctx.r6.u32;
+    if(!xna){ctx.r3.u32=10022;return;}
+    std::lock_guard l(g_peers.m);const auto it=g_peers.xnaddr.find(addr);
+    if(it==g_peers.xnaddr.end()){ctx.r3.u32=10065;return;}
+    std::memcpy(base+xna,it->second.data(),it->second.size());if(kid)Write64(base,kid,g_peers.keyOf[addr]);ctx.r3.u32=0;
 }
 
 // Title servers (Namco's GIN / lobby): none exist here.
@@ -280,6 +326,7 @@ PPC_FUNC(__imp__NetDll_XNetUnregisterInAddr) { KTrace("NetDll_XNetUnregisterInAd
 PPC_FUNC(__imp__NetDll_XNetQosServiceLookup)
 {
     KTrace("NetDll_XNetQosServiceLookup");
+    if(net::VirtualLanEnabled())net::lan::Query();
     const uint32_t event = ctx.r5.u32, out = ctx.r6.u32;
     if (!out) { ctx.r3.u64 = 10022; return; }
     const uint32_t q = xlive::GuestAlloc(8 + 0x18);

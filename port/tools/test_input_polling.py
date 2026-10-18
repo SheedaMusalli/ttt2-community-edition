@@ -18,6 +18,7 @@ CHECKER = r'''
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <Xinput.h>
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -54,6 +55,8 @@ DWORD SampleTestCaps(DWORD index,DWORD,XINPUT_CAPABILITIES* out) {
 #define GetWindowThreadProcessId TestWindowProcess
 #define XInputGetState SampleTestPad
 #define XInputGetCapabilities SampleTestCaps
+static std::atomic<bool> g_user1DeviceConnected{false};
+static std::atomic<bool> g_user1PhysicalConnected{false};
 @PRODUCTION@
 static unsigned checks=0;
 #define CHECK(x) do {++checks;if(!(x)){std::fprintf(stderr,"FAIL line%d: %s\n",__LINE__,#x);return 1;}}while(0)
@@ -64,6 +67,8 @@ void Reset() {
         physical[i]=false;host[i]={};capabilities[i]={};samples[i]=capsSamples[i]=0;
         g_pads[i].connected=false;g_pads[i].physical=false;g_pads[i].state={};g_pads[i].caps={};
     }
+    g_user1DeviceConnected=false;
+    g_user1PhysicalConnected=false;
 }
 int main() {
     CHECK(NormalizePadPollRateHz(250)==250);
@@ -313,9 +318,24 @@ int main() {
     keyboard_keys::Assign(keyboard_keys::A,'P',1);
     Reset();poll={};keys['P']=true;PollPadsOnce(poll,false,64,nullptr,true);
     CHECK(g_pads[1].connected && !g_pads[1].physical && g_pads[1].state.Gamepad.wButtons==0x1000);
+    CHECK(g_user1DeviceConnected.load()); // a separate keyboard creates local guest user 1
+    CHECK(!g_user1PhysicalConnected.load());
     CHECK(g_pads[0].state.Gamepad.wButtons==0);
     Reset();poll={};keys['P']=true;PollPadsOnce(poll,false,72,nullptr,false);
-    CHECK(!g_pads[1].connected); // The launcher checkbox gates Player 2 keyboard.
+    CHECK(!g_pads[1].connected && !g_user1DeviceConnected.load()); // The launcher checkbox gates Player 2 keyboard.
+    // Dedicated keyboard/controller assignment keeps the keyboard at P1 and the first XInput
+    // device at P2, regardless of which device sends input first.
+    Reset();poll={};physical[0]=true;keys['A']=true;host[0].Gamepad.wButtons=0x2000;
+    PollPadsOnce(poll,false,76,nullptr,false,1);
+    CHECK(g_pads[0].state.Gamepad.wButtons==0x1000 && !g_pads[0].physical);
+    CHECK(g_pads[1].state.Gamepad.wButtons==0x2000 && g_pads[1].physical);
+    CHECK(g_user1DeviceConnected.load() && g_user1PhysicalConnected.load());
+    // The inverse mode reserves P2 for the second keyboard and leaves the controller on P1.
+    Reset();poll={};physical[0]=true;keys['U']=true;keyboard_keys::Assign(keyboard_keys::A,'U',1);
+    PollPadsOnce(poll,false,78,nullptr,true,2);
+    CHECK(g_pads[0].physical && g_pads[0].connected);
+    CHECK(g_pads[1].connected && !g_pads[1].physical && g_pads[1].state.Gamepad.wButtons==0x1000 && g_user1DeviceConnected.load());
+    keyboard_keys::RestoreDefaults(1);
     keyboard_keys::RestoreDefaults(1);
     keyboard_keys::Assign(keyboard_keys::LSUp,'I');
     keyboard_keys::Assign(keyboard_keys::RSLeft,'O');

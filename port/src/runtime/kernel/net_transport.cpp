@@ -7,11 +7,17 @@
 #include "enet/enet.h"
 #include "net_transport.h"
 #include "steam_net.h"
+#include "../net/net_adapter.h"
+#include "../net/net_telemetry.h"
+#include "../net/virtual_lan.h"
+#include <algorithm>
+#include <cmath>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <map>
 #include <mutex>
 #include <string>
@@ -36,10 +42,15 @@ std::atomic<uint64_t> g_local{ 0 };
 Receiver g_receiver = nullptr;
 ENetHost* g_host = nullptr;
 bool g_steam = false;
+Adapter g_adapter;
+std::atomic<float> g_simRift{0};
+std::atomic<bool> g_simValid{false};
 uint16_t g_requestedPort = 0;
 std::map<uint64_t, ENetAddress> g_addresses;
 std::map<uint64_t, ENetPeer*> g_peers;
 std::map<ENetPeer*, uint64_t> g_peerIds;
+struct PendingPacket { Channel channel{}; std::vector<uint8_t> bytes; };
+std::map<uint64_t, std::deque<PendingPacket>> g_pendingPackets;
 struct RelayRoute { sockaddr_in endpoint{}; uint8_t token[16]{}; uint8_t role = 0; std::chrono::steady_clock::time_point firstSend{}; bool hasSent = false; bool fallback = false; };
 std::map<uint64_t, RelayRoute> g_relayRoutes;
 SOCKET g_relaySocket = INVALID_SOCKET;
@@ -54,6 +65,7 @@ uint64_t IdForAddress(const ENetAddress& address)
 {
     for (const auto& [id, endpoint] : g_addresses)
         if (endpoint.host == address.host && endpoint.port == address.port) return id;
+    if(VirtualLanEnabled())return kEndpointTag ^ (uint64_t(ntohl(address.host))<<16) ^ address.port;
     if ((address.host & 0xFFu) == 127u) return kLoopTag | address.port;
     uint64_t id = kEndpointTag ^ (uint64_t(address.host) << 16) ^ address.port;
     if (!id) id = kEndpointTag | 1;
@@ -97,12 +109,41 @@ void ReceiveLoop()
         if (result <= 0) continue;
         if (event.type == ENET_EVENT_TYPE_CONNECT)
         {
-            std::lock_guard lock(g_mutex);
-            uint64_t id = IdForAddress(event.peer->address);
-            g_peers[id] = event.peer;
-            g_peerIds[event.peer] = id;
-            auto route = g_relayRoutes.find(id);
-            if (route != g_relayRoutes.end()) route->second.hasSent = false;
+            uint64_t id = 0;
+            std::deque<PendingPacket> pending;
+            {
+                std::lock_guard lock(g_mutex);
+                id = IdForAddress(event.peer->address);
+                g_peers[id] = event.peer;
+                g_peerIds[event.peer] = id;
+                char ip[16]{}; enet_address_get_host_ip(&event.peer->address,ip,sizeof(ip));
+                const auto endpoint=std::string(ip)+":"+std::to_string(event.peer->address.port);
+                telemetry::SetPeer(endpoint.c_str(),telemetry::State::Connected);
+                auto route = g_relayRoutes.find(id);
+                if (route != g_relayRoutes.end()) route->second.hasSent = false;
+                auto queued = g_pendingPackets.find(id);
+                if (queued != g_pendingPackets.end())
+                {
+                    pending.swap(queued->second);
+                    g_pendingPackets.erase(queued);
+                }
+            }
+            if (!pending.empty())
+            {
+                std::lock_guard hostLock(g_hostMutex);
+                for (PendingPacket& item : pending)
+                {
+                    const enet_uint8 channel = item.channel == Channel::Reliable ? kControlChannel : kInputChannel;
+                    const enet_uint32 flags = item.channel == Channel::Reliable ? ENET_PACKET_FLAG_RELIABLE : VirtualLanEnabled()?ENET_PACKET_FLAG_UNRELIABLE_FRAGMENT:0;
+                    ENetPacket* packet = enet_packet_create(item.bytes.data(), item.bytes.size(), flags);
+                    if (!packet || enet_peer_send(event.peer, channel, packet) != 0)
+                    {
+                        if (packet) enet_packet_destroy(packet);
+                        std::fprintf(stderr, "[net] queued packet could not be sent after peer connection\n");
+                    }
+                }
+                enet_host_flush(g_host);
+            }
         }
         else if (event.type == ENET_EVENT_TYPE_RECEIVE)
         {
@@ -133,6 +174,8 @@ void ReceiveLoop()
             auto found = g_peerIds.find(event.peer);
             if (found != g_peerIds.end())
             {
+                telemetry::SetState(telemetry::State::Searching);
+                g_pendingPackets.erase(found->second);
                 auto peer = g_peers.find(found->second);
                 if (peer != g_peers.end() && peer->second == event.peer) g_peers.erase(peer);
                 g_peerIds.erase(found);
@@ -169,7 +212,7 @@ bool Start(Receiver receiver)
     if (g_started.load()) return true;
     const char* choice = std::getenv("TTT2_NET");
     const bool needSteam = choice && std::strcmp(choice, "steam") == 0;
-    if (choice && std::strcmp(choice, "loopback") != 0 && !needSteam && std::strcmp(choice, "ipv4") != 0)
+    if (choice && std::strcmp(choice, "loopback") != 0 && !needSteam && std::strcmp(choice, "ipv4") != 0 && !VirtualLanEnabled())
     {
         std::fprintf(stderr, "[net] unknown TTT2_NET backend\n");
         return false;
@@ -186,6 +229,12 @@ bool Start(Receiver receiver)
     if (enet_initialize() != 0) return false;
     ENetAddress bindAddress{};
     bindAddress.host = ENET_HOST_ANY;
+    if(VirtualLanEnabled()) {
+        if(!SelectAdapter(g_adapter,std::getenv("TTT2_LOCAL_IP"))) { std::fprintf(stderr,"[net] no active adapter matches TTT2_LOCAL_IP\n");enet_deinitialize();return false; }
+        bindAddress.host=htonl(g_adapter.ip_host);
+        telemetry::SetAdapter(g_adapter.name.c_str(),g_adapter.ip.c_str(),RedundancyEnabled());
+        std::fprintf(stderr,"[net] adapter %s, priority %d, IPv4 %s, mask %08X, broadcast %s\n",g_adapter.name.c_str(),g_adapter.priority,g_adapter.ip.c_str(),g_adapter.mask_host,g_adapter.broadcast.c_str());
+    } else telemetry::SetAdapter("IPv4 / ENet","auto",false);
     const char* portEnv = std::getenv("TTT2_NET_PORT");
     uint16_t port = g_requestedPort;
     if (portEnv && *portEnv)
@@ -202,10 +251,19 @@ bool Start(Receiver receiver)
     if (!port) { enet_host_destroy(g_host); g_host = nullptr; return false; }
     const char* backend = choice && std::strcmp(choice, "ipv4") == 0 ? "IPv4/ENet" : "ENet loopback/LAN";
     // Preserve a stable local identity format consumed by XNADDR and the existing socket shim.
-    g_local = kLoopTag | port;
+    g_local = VirtualLanEnabled() ? (kEndpointTag ^ (uint64_t(g_adapter.ip_host)<<16) ^ port) : kLoopTag | port;
     g_started = true;
     g_relaySocket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (g_relaySocket != INVALID_SOCKET) { u_long nonblocking = 1; ioctlsocket(g_relaySocket, FIONBIO, &nonblocking); }
+    if(VirtualLanEnabled()) {
+        int bytes=262144;BOOL yes=TRUE;
+        setsockopt(g_host->socket,SOL_SOCKET,SO_BROADCAST,reinterpret_cast<const char*>(&yes),sizeof(yes));
+        setsockopt(g_host->socket,SOL_SOCKET,SO_RCVBUF,reinterpret_cast<const char*>(&bytes),sizeof(bytes));
+        setsockopt(g_host->socket,SOL_SOCKET,SO_SNDBUF,reinterpret_cast<const char*>(&bytes),sizeof(bytes));
+        lan::SetDatagramReceiver([](uint64_t peer,const uint8_t* data,size_t size){if(auto fn=g_receiver)fn(peer,Channel::Unreliable,data,size);});
+        if(!lan::Start(g_adapter,g_local.load(),port)){g_started=false;enet_host_destroy(g_host);g_host=nullptr;if(g_relaySocket!=INVALID_SOCKET){closesocket(g_relaySocket);g_relaySocket=INVALID_SOCKET;}return false;}
+        telemetry::SetState(telemetry::State::Searching);
+    }
     std::thread(ReceiveLoop).detach();
     std::fprintf(stderr, "[net] %s listening on UDP port %u\n", backend, unsigned(port));
     return true;
@@ -213,6 +271,21 @@ bool Start(Receiver receiver)
 
 uint64_t LocalPeer() { return g_local.load(); }
 const char* BackendName() { return g_steam ? "steam" : "enet-ipv4"; }
+bool IsBroadcastIPv4(uint32_t address){return address==0xFFFFFFFFu||(VirtualLanEnabled()&&g_adapter.ip_host&&address==(g_adapter.ip_host|~g_adapter.mask_host));}
+uint32_t LocalIPv4(){return g_adapter.ip_host;}
+uint16_t ListenPort(){return uint16_t(g_local.load()&0xFFFFu);}
+bool BroadcastDatagram(const void* bytes,size_t size){return VirtualLanEnabled()&&lan::Broadcast(static_cast<const uint8_t*>(bytes),size);}
+void ReportSimulationSync(uint64_t localFrame,uint64_t remoteFrame,float remoteAdvantage){
+    if(!std::isfinite(remoteAdvantage))return;
+    const double diff=double(localFrame)-double(remoteFrame);
+    g_simRift=float(std::clamp((diff-double(remoteAdvantage))*0.5,-120.0,120.0));g_simValid=true;
+    telemetry::SetSimulationSync(g_simRift.load(),0,true);
+}
+void NetTransport_ApplyFrameRiftPacing(){
+    if(!RedundancyEnabled()||!g_simValid.load())return;
+    const float rift=g_simRift.load();const int us=rift>0.5f?std::clamp(int(rift*1200),100,3000):0;
+    telemetry::SetSimulationSync(rift,us,true);if(us)std::this_thread::sleep_for(std::chrono::microseconds(us));
+}
 
 bool RegisterPeer(uint64_t peer, const char* ipv4, uint16_t port)
 {
@@ -274,22 +347,51 @@ bool Send(uint64_t peer, Channel channel, const void* data, size_t size)
     if (!connection)
     {
         ENetAddress address{};
-        if (!Resolve(peer, address)) return false;
+        if (!Resolve(peer, address))
+        {
+            std::fprintf(stderr, "[net] peer %016llX has no registered endpoint\n", (unsigned long long)peer);
+            return false;
+        }
         {
             std::lock_guard hostLock(g_hostMutex);
             connection = enet_host_connect(g_host, &address, 2, 0);
         }
-        if (!connection) return false;
+        if (!connection)
+        {
+            std::fprintf(stderr, "[net] ENet could not allocate peer for %u.%u.%u.%u:%u\n",
+                         address.host & 0xFFu, (address.host >> 8) & 0xFFu,
+                         (address.host >> 16) & 0xFFu, (address.host >> 24) & 0xFFu,
+                         unsigned(address.port));
+            return false;
+        }
         g_peers[peer] = connection;
         g_peerIds[connection] = peer;
     }
     const enet_uint8 channelId = channel == Channel::Reliable ? kControlChannel : kInputChannel;
-    const enet_uint32 flags = channel == Channel::Reliable ? ENET_PACKET_FLAG_RELIABLE : 0;
+    const enet_uint32 flags = channel == Channel::Reliable ? ENET_PACKET_FLAG_RELIABLE : VirtualLanEnabled()?ENET_PACKET_FLAG_UNRELIABLE_FRAGMENT:0;
     ENetPacket* packet = enet_packet_create(data, size, flags);
     if (!packet) return false;
     std::lock_guard hostLock(g_hostMutex);
+    if (connection->state == ENET_PEER_STATE_CONNECTING)
+    {
+        enet_packet_destroy(packet);
+        auto& pending = g_pendingPackets[peer];
+        if (pending.size() >= 64) return false;
+        PendingPacket queued;
+        queued.channel = channel;
+        queued.bytes.assign(static_cast<const uint8_t*>(data), static_cast<const uint8_t*>(data) + size);
+        pending.push_back(std::move(queued));
+        return true;
+    }
+    if (connection->state != ENET_PEER_STATE_CONNECTED)
+    {
+        enet_packet_destroy(packet);
+        return false;
+    }
     if (enet_peer_send(connection, channelId, packet) != 0)
     {
+        std::fprintf(stderr, "[net] ENet send rejected packet for peer %016llX (state %u, channel %u)\n",
+                     (unsigned long long)peer, unsigned(connection->state), unsigned(channelId));
         enet_packet_destroy(packet);
         return false;
     }

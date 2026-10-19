@@ -34,7 +34,7 @@ Version 2.3.0 added the launcher console visibility setting and repaint cleanup,
 
 ## Install and play
 
-Use 64-bit Windows 10 or 11, a Direct3D 11-capable graphics device, and about 13 GB of free space. Installation requires an Xbox 360 disc image you are legally entitled to use. This repository does not provide a game ISO download. The installer processes the supplied files locally; it does not download or include the game image.
+Use 64-bit Windows 10 or 11, a Direct3D 11-capable graphics device, and about 13 GB of free space. Installation requires an Xbox 360 disc image you are legally entitled to use. The installer processes the supplied files locally; it does not download or include the game image.
 
 The setup compresses its included runtime with Windows LZMS to reduce the download; installation expands the executable locally, so its installed size is unchanged.
 

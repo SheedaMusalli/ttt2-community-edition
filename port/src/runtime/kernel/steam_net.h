@@ -1,4 +1,4 @@
-// Steam backend of the online layer: requires a configured authorized AppID; peer packets over
+// Steam backend of the online layer: uses a configured AppID (launcher default 480); peer packets over
 // SteamNetworkingMessages (Valve relays, no port forwarding), sessions as Steam lobbies, a friend's
 // "Join Game" as the game's own invite. Built only when the Steamworks SDK is present
 // (TTT2_HAVE_STEAM); otherwise every call reports "not running" and the loopback backend is used.
@@ -27,14 +27,14 @@ void RemoveLobby(uint64_t sessionId);
 std::vector<std::vector<uint8_t>> ListLobbies(int max, int timeoutMs);
 // A friend's "Join Game" (GameLobbyJoinRequested_t): the lobby's record, once.
 bool TakeJoinRequest(std::vector<uint8_t>& record);
+bool OpenInviteDialog(uint64_t sessionId);
+bool QueueJoinLobby(uint64_t lobbyId);
 
-// The calls above run Steam in a HELPER PROCESS (steam_bridge.cpp): this exe started again as
-// `--steam-bridge`, talking over its stdin/stdout. Steam Input hides every controller from the
-// process that runs SteamAPI as app 480 (MEASURED 2026-10-12: XInput slots 0+1 connected before
-// SteamAPI_InitEx, none after, gameoverlayrenderer64.dll loaded) and Spacewar's controller
-// config gives the game nothing back - so the game process must never load Steam. Unhooked
-// processes keep seeing the pads while app 480 runs. TTT2_STEAM_INPROC=1 = the old in-process
-// path (diagnostics only: no controller).
+// The in-process implementation (steam_net.cpp) is selected for Steam Friends so the visible
+// game process owns the Steam app session and overlay. It must start before D3D device creation.
+// TTT2_STEAM_INPROC=0 selects the helper-process diagnostic path in steam_bridge.cpp; that mode
+// can preserve the game's direct XInput path but Steam may attach its overlay to the background
+// helper instead of the visible game.
 int RunBridge();                         // main() of the helper process
 
 // The in-process implementation (steam_net.cpp), used by the helper.
@@ -47,6 +47,8 @@ void PublishLobby(uint64_t sessionId, const std::vector<uint8_t>& record);
 void RemoveLobby(uint64_t sessionId);
 std::vector<std::vector<uint8_t>> ListLobbies(int max, int timeoutMs);
 bool TakeJoinRequest(std::vector<uint8_t>& record);
+bool OpenInviteDialog(uint64_t sessionId);
+bool QueueJoinLobby(uint64_t lobbyId);
 } // namespace direct
 
 } // namespace steamnet

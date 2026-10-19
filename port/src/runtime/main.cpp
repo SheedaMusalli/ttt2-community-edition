@@ -480,20 +480,25 @@ static void RunGuest(PPCContext& ctx, uint8_t* base)
 
 int main(int argc, char** argv)
 {
-    // The Steam helper process (kernel/steam_bridge.cpp): Steam lives there so Steam Input does
-    // not hide the controllers from the game. Nothing of the game starts in it.
+    // Optional diagnostic Steam helper (kernel/steam_bridge.cpp).
     if (argc >= 2 && std::strcmp(argv[1], "--steam-bridge") == 0) return steamnet::RunBridge();
     int kept=1;
     for(int i=1;i<argc;++i){
         if(std::strncmp(argv[i],"--peer-ip=",10)==0){_putenv_s("TTT2_PEER_IP",argv[i]+10);if(!std::getenv("TTT2_NET"))_putenv_s("TTT2_NET","hamachi");}
         else if(std::strncmp(argv[i],"--local-ip=",11)==0){_putenv_s("TTT2_LOCAL_IP",argv[i]+11);if(!std::getenv("TTT2_NET"))_putenv_s("TTT2_NET","hamachi");}
+        else if(std::strcmp(argv[i],"+connect_lobby")==0&&i+1<argc){_putenv_s("TTT2_STEAM_JOIN_LOBBY",argv[++i]);if(!std::getenv("TTT2_NET"))_putenv_s("TTT2_NET","steam");if(!std::getenv("TTT2_STEAM_APP_ID"))_putenv_s("TTT2_STEAM_APP_ID","480");}
+        else if(std::strncmp(argv[i],"+connect_lobby=",15)==0){_putenv_s("TTT2_STEAM_JOIN_LOBBY",argv[i]+15);if(!std::getenv("TTT2_NET"))_putenv_s("TTT2_NET","steam");if(!std::getenv("TTT2_STEAM_APP_ID"))_putenv_s("TTT2_STEAM_APP_ID","480");}
         else argv[kept++]=argv[i];
     }
     argc=kept;argv[argc]=nullptr;
     const std::string installedImage = InstalledLayout(argc);
     std::setvbuf(stderr, nullptr, _IONBF, 0);   // unbuffered: trace survives a hard crash
     StartLogWriter();
-    if(net::VirtualLanEnabled()&&!XSocketStartTransport())std::fprintf(stderr,"[net] LAN transport initialization failed; check adapter/bind configuration\n");
+    const char* netMode = std::getenv("TTT2_NET");
+    const bool steamMode = netMode && std::strcmp(netMode, "steam") == 0;
+    if((net::VirtualLanEnabled() || steamMode) && !XSocketStartTransport())
+        std::fprintf(stderr, steamMode ? "[net] Steam startup failed; check Steam is running and Steam Friends is selected\n"
+                                       : "[net] LAN transport initialization failed; check adapter/bind configuration\n");
 
     // Timer resolution. Since Windows 10 2004 a process that never calls timeBeginPeriod
     // gets the default ~15.6 ms timer even if other processes asked for more, so every

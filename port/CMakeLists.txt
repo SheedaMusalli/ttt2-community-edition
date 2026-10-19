@@ -47,6 +47,7 @@ add_executable(ttt2_test_netplay_input
     tools/test_netplay_input.cpp
     src/runtime/kernel/netplay_input.cpp)
 target_include_directories(ttt2_test_netplay_input PRIVATE src/runtime/kernel)
+add_executable(ttt2_test_online_policy tools/test_online_policy.cpp)
 if(WIN32)
     add_executable(ttt2_test_save_store
         tools/test_save_store.cpp
@@ -105,6 +106,7 @@ if(BUILD_TESTING)
     add_test(NAME net_support COMMAND ttt2_test_net_support "${CMAKE_BINARY_DIR}/netplay-hud-preview.bmp")
     add_test(NAME rollback_loop COMMAND ttt2_test_rollback)
     add_test(NAME netplay_input COMMAND ttt2_test_netplay_input)
+    add_test(NAME online_policy COMMAND ttt2_test_online_policy)
     if(WIN32)
         add_test(NAME save_store COMMAND ttt2_test_save_store)
         add_test(NAME xnet_route COMMAND ttt2_test_xnet_route)
@@ -236,7 +238,12 @@ target_link_libraries(tekken_recomp PRIVATE tekken_ppc xaudio2 ole32 winmm ttt2_
 # tools/steamworks_sdk_165 (user-supplied, not part of the repository). steam_api64.dll is
 # delay-loaded and copied next to the executable; without it (or without a running Steam
 # client) the game falls back to the loopback transport.
-set(TTT2_STEAMWORKS "${CMAKE_SOURCE_DIR}/../tools/steamworks_sdk_165/sdk" CACHE PATH "Steamworks SDK (sdk folder)")
+set(TTT2_STEAMWORKS_DEFAULT "${CMAKE_SOURCE_DIR}/../tools/steamworks_sdk_165/sdk")
+if(NOT EXISTS "${TTT2_STEAMWORKS_DEFAULT}/public/steam/steam_api.h" AND
+   WIN32 AND EXISTS "C:/sdk/public/steam/steam_api.h")
+    set(TTT2_STEAMWORKS_DEFAULT "C:/sdk")
+endif()
+set(TTT2_STEAMWORKS "${TTT2_STEAMWORKS_DEFAULT}" CACHE PATH "Steamworks SDK (sdk folder)")
 set(TTT2_HAVE_STEAMWORKS OFF)
 if(EXISTS "${TTT2_STEAMWORKS}/public/steam/steam_api.h" AND EXISTS "${TTT2_STEAMWORKS}/redistributable_bin/win64/steam_api64.lib")
     set(TTT2_HAVE_STEAMWORKS ON)
@@ -257,7 +264,7 @@ target_link_options(tekken_recomp PRIVATE "/MAP:tekken_recomp.map")
 
 # --- Version, icon -------------------------------------------------------------------------
 # One version for the game executable's VERSIONINFO, the installer and Add or remove programs.
-set(TTT2_VERSION "2.3.0")
+set(TTT2_VERSION "2.3.1")
 string(REPLACE "." "," TTT2_VERSION_COMMAS "${TTT2_VERSION},0")
 # Original TTT2 Community Edition mark, shared by the installer and installed game executable.
 set(TTT2_SETUP_ICON "${CMAKE_SOURCE_DIR}/src/setup/ttt2.ico")
@@ -282,6 +289,7 @@ set_source_files_properties("${CMAKE_BINARY_DIR}/launcher.rc" PROPERTIES OBJECT_
 add_executable(ttt2_launcher WIN32 src/launcher/launcher.cpp src/runtime/net/net_adapter.cpp "${CMAKE_BINARY_DIR}/launcher.rc")
 target_link_libraries(ttt2_launcher PRIVATE comctl32 shell32 ole32 uxtheme dwmapi winhttp crypt32 bcrypt ws2_32 iphlpapi)
 target_compile_definitions(ttt2_launcher PRIVATE _CRT_SECURE_NO_WARNINGS UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
+    TTT2_LAUNCHER_HAS_STEAMWORKS=$<BOOL:${TTT2_HAVE_STEAMWORKS}>
     TTT2_VERSION_STR="${TTT2_VERSION}")
 if(MSVC)
     target_compile_options(ttt2_launcher PRIVATE /O2)
@@ -299,7 +307,7 @@ set(TTT2_STEAM_DLL "${TTT2_STEAMWORKS}/redistributable_bin/win64/steam_api64.dll
 set(TTT2_STEAM_RESOURCE_LINE "")
 set(TTT2_STEAM_RESOURCE_DEPENDENCY "")
 if(TTT2_HAVE_STEAMWORKS AND EXISTS "${TTT2_STEAM_DLL}")
-    set(TTT2_STEAM_RESOURCE_LINE "IDR_STEAM_API          RCDATA  \"@TTT2_STEAM_DLL@\"")
+    set(TTT2_STEAM_RESOURCE_LINE "IDR_STEAM_API          RCDATA  \"${TTT2_STEAM_DLL}\"")
     set(TTT2_STEAM_RESOURCE_DEPENDENCY "${TTT2_STEAM_DLL}")
 endif()
 set(XENON_THIRDPARTY "${XENON_UTILS}/../thirdparty")

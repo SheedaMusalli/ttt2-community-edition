@@ -25,6 +25,8 @@
 #include "timeline.h"
 #include "display_settings.h"
 #include "sys_ui.h"
+#include "matchmaking.h"
+#include "net_transport.h"
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -164,6 +166,41 @@ static void WriteFrontBufferBmp(const uint32_t* px)
 
 // The game window. Closing it quits (as the main menu's EXIT does); Alt+Enter switches between
 // windowed and borderless (Options -> Display Settings -> DISPLAY MODE offers all three).
+static bool g_steamInviteKeyDown = false;
+static void OpenSteamInviteFromHotkey(HWND wnd)
+{
+    const char* backend = net::BackendName();
+    std::fprintf(stderr, "[steam] F4 invite hotkey received; backend=%s\n", backend);
+    if (std::strcmp(backend, "steam") != 0)
+    {
+        MessageBoxA(wnd,
+            "Steam Friends transport is not active. In the launcher, choose Online > Steam Friends, save, and relaunch the game.",
+            "Steam invite", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    if (!mm::OpenSteamInviteDialog())
+        MessageBoxA(wnd,
+            "No Steam Player Match lobby is ready to invite friends from yet. Host a Player Match and wait until the room is open, then press F4 again.",
+            "Steam invite", MB_OK | MB_ICONINFORMATION);
+    else
+        std::fprintf(stderr, "[steam] invite dialog requested for the active Player Match lobby\n");
+}
+
+// Keep the window-message path and add a polling fallback in the presenter loops. The fallback
+// covers fullscreen / overlay focus transitions that can swallow WM_KEYDOWN. Both paths share a
+// latch, so holding F4 never opens repeated dialogs.
+static void PollSteamInviteHotkey(HWND wnd)
+{
+    const bool down = (GetAsyncKeyState(VK_F4) & 0x8000) != 0;
+    if (!down)
+    {
+        g_steamInviteKeyDown = false;
+        return;
+    }
+    if (g_steamInviteKeyDown || (GetAsyncKeyState(VK_MENU) & 0x8000)) return;
+    g_steamInviteKeyDown = true;
+    if (GetForegroundWindow() == wnd && !SysUiTextEntryActive()) OpenSteamInviteFromHotkey(wnd);
+}
 static LRESULT CALLBACK GameWndProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
 {
     if ((msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) && SysUiKeyCaptureActive())
@@ -207,7 +244,15 @@ static LRESULT CALLBACK GameWndProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         break;
     case WM_KEYDOWN:
         if(wp==VK_F2 && !(lp&(1ll<<30)) && !SysUiTextEntryActive()){net::telemetry::ToggleHud();return 0;}
+        if(wp==VK_F4 && !(lp&(1ll<<30)) && !SysUiTextEntryActive()){
+            g_steamInviteKeyDown = true;
+            OpenSteamInviteFromHotkey(wnd);
+            return 0;
+        }
         if (wp == VK_ESCAPE && SysUiTextEntryActive()) { SysUiOnChar(0x1B); return 0; }
+        break;
+    case WM_KEYUP:
+        if (wp == VK_F4) g_steamInviteKeyDown = false;
         break;
     }
     return DefWindowProcA(wnd, msg, wp, lp);
@@ -285,6 +330,7 @@ static unsigned __stdcall PresentThread(void*)
                 TranslateMessage(&msg);
                 DispatchMessageA(&msg);
             }
+            PollSteamInviteHotkey(wnd);
             const uint32_t generation = display_settings::Generation();
             // Leaving exclusive fullscreen: the presenter switches back first, or DXGI would
             // restore the window it saved over the new style. While exclusive fullscreen stays on
@@ -319,6 +365,7 @@ static unsigned __stdcall PresentThread(void*)
             TranslateMessage(&msg);
             DispatchMessageA(&msg);
         }
+        PollSteamInviteHotkey(wnd);
         if (uint32_t fb = g_frontBufferPhys.load())
         {
             ConvertFrontBuffer(fb, staging);

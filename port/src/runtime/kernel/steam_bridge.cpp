@@ -29,7 +29,8 @@
 namespace steamnet {
 namespace {
 
-enum : uint8_t { kSend = 1, kPublish = 2, kRemove = 3, kList = 4, kReady = 101, kRecv = 102, kListResult = 103, kJoin = 104 };
+enum : uint8_t { kSend = 1, kPublish = 2, kRemove = 3, kList = 4, kInvite = 5, kQueueJoin = 6,
+                 kReady = 101, kRecv = 102, kListResult = 103, kJoin = 104 };
 constexpr uint32_t kMaxFrame = 16u << 20;
 
 void Put32(uint8_t* p, uint32_t v) { std::memcpy(p, &v, 4); }
@@ -231,7 +232,7 @@ bool Start(Receiver receiver)
     if (const char* e = std::getenv("TTT2_STEAM_INPROC"); e && *e == '1')
     {
         g_inproc = true;
-        std::fprintf(stderr, "[steam] TTT2_STEAM_INPROC=1: Steam in the game process (controllers will be hidden)\n");
+        std::fprintf(stderr, "[steam] running in the game process so the overlay binds to the visible game window\n");
         return direct::Start(receiver);
     }
     g_receiver = receiver;
@@ -245,6 +246,12 @@ bool Start(Receiver receiver)
         return false;
     }
     g_running = true;
+    if (const char* lobby = std::getenv("TTT2_STEAM_JOIN_LOBBY"))
+    {
+        char* end = nullptr;
+        const unsigned long long id = std::strtoull(lobby, &end, 10);
+        if (end && !*end && id) QueueJoinLobby(uint64_t(id));
+    }
     std::fprintf(stderr, "[steam] Steam runs in helper process %lu (Steam id %016llX)\n", GetProcessId(g_helper),
                  (unsigned long long)g_local.load());
     return true;
@@ -317,6 +324,22 @@ bool TakeJoinRequest(std::vector<uint8_t>& record)
     return true;
 }
 
+bool OpenInviteDialog(uint64_t sessionId)
+{
+    if (g_inproc) return direct::OpenInviteDialog(sessionId);
+    if (!g_running || !sessionId) return false;
+    uint8_t body[8]; Put64(body, sessionId);
+    return g_out.Frame(kInvite, body, sizeof(body));
+}
+
+bool QueueJoinLobby(uint64_t lobbyId)
+{
+    if (g_inproc) return direct::QueueJoinLobby(lobbyId);
+    if (!g_running || !lobbyId) return false;
+    uint8_t body[8]; Put64(body, lobbyId);
+    return g_out.Frame(kQueueJoin, body, sizeof(body));
+}
+
 // ---- helper side
 int RunBridge()
 {
@@ -352,6 +375,10 @@ int RunBridge()
             direct::PublishLobby(Get64(p.data()), std::vector<uint8_t>(p.begin() + 8, p.end()));
         else if (type == kRemove && p.size() >= 8)
             direct::RemoveLobby(Get64(p.data()));
+        else if (type == kInvite && p.size() >= 8)
+            direct::OpenInviteDialog(Get64(p.data()));
+        else if (type == kQueueJoin && p.size() >= 8)
+            direct::QueueJoinLobby(Get64(p.data()));
         else if (type == kList && p.size() >= 12)
         {
             const uint32_t request = Get32(p.data());

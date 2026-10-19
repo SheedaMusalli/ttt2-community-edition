@@ -63,8 +63,29 @@ std::vector<uint8_t> Unhex(const char* s)
 void WriteLobbyData(uint64_t lobby, const std::vector<uint8_t>& record)
 {
     CSteamID id(lobby);
-    SteamMatchmaking()->SetLobbyData(id, "proto", kProtocol);
-    SteamMatchmaking()->SetLobbyData(id, "rec", Hex(record).c_str());
+    ISteamMatchmaking* matchmaking = SteamMatchmaking();
+    const bool joinable = matchmaking->SetLobbyJoinable(id, true);
+    const bool memberLimit = matchmaking->SetLobbyMemberLimit(id, 8);
+    const bool proto = matchmaking->SetLobbyData(id, "proto", kProtocol);
+    const bool sessionRecord = matchmaking->SetLobbyData(id, "rec", Hex(record).c_str());
+    char connect[64]{};
+    std::snprintf(connect, sizeof(connect), "+connect_lobby %llu", (unsigned long long)lobby);
+    ISteamFriends* friends = SteamFriends();
+    const bool presenceConnect = friends->SetRichPresence("connect", connect);
+    const bool presenceStatus = friends->SetRichPresence("status", "Hosting TTT2 Community Edition Player Match");
+    std::fprintf(stderr, "[steam] lobby advertised %016llX: joinable=%d limit=%d metadata=%d/%d presence=%d/%d connect='%s'\n",
+                 (unsigned long long)lobby, joinable, memberLimit, proto, sessionRecord,
+                 presenceConnect, presenceStatus, connect);
+}
+
+void RequestLobbyJoin(uint64_t lobby)
+{
+    if (!lobby) return;
+    std::lock_guard l(g_mutex);
+    g_joinLobby = lobby;
+    g_joinReady = false;
+    g_joinRecord.clear();
+    SteamMatchmaking()->JoinLobby(CSteamID(lobby));
 }
 
 // Service thread: callbacks, call results, packets.
@@ -123,11 +144,38 @@ void Service()
             else if (cb.m_iCallback == GameLobbyJoinRequested_t::k_iCallback)
             {
                 const auto* j = reinterpret_cast<const GameLobbyJoinRequested_t*>(cb.m_pubParam);
-                std::lock_guard l(g_mutex);
-                g_joinLobby = j->m_steamIDLobby.ConvertToUint64();
-                g_joinReady = false;
-                SteamMatchmaking()->RequestLobbyData(j->m_steamIDLobby);
+                const uint64_t lobby = j->m_steamIDLobby.ConvertToUint64();
+                RequestLobbyJoin(lobby);
                 std::fprintf(stderr, "[steam] Join Game request: lobby %016llX\n", (unsigned long long)g_joinLobby);
+            }
+            else if (cb.m_iCallback == GameRichPresenceJoinRequested_t::k_iCallback)
+            {
+                const auto* j = reinterpret_cast<const GameRichPresenceJoinRequested_t*>(cb.m_pubParam);
+                const char* connect = j->m_rgchConnect;
+                const char* digits = connect;
+                constexpr char prefix[] = "+connect_lobby ";
+                if (std::strncmp(connect, prefix, sizeof(prefix) - 1) == 0) digits += sizeof(prefix) - 1;
+                char* end = nullptr;
+                const unsigned long long lobby = std::strtoull(digits, &end, 10);
+                if (end && end != digits && !*end) {
+                    RequestLobbyJoin(uint64_t(lobby));
+                    std::fprintf(stderr, "[steam] Rich Presence join request: lobby %016llX\n", lobby);
+                } else {
+                    std::fprintf(stderr, "[steam] ignored invalid Rich Presence join string\n");
+                }
+            }
+            else if (cb.m_iCallback == LobbyEnter_t::k_iCallback)
+            {
+                const auto* entered = reinterpret_cast<const LobbyEnter_t*>(cb.m_pubParam);
+                const uint64_t lobby = entered->m_ulSteamIDLobby;
+                std::lock_guard l(g_mutex);
+                if (lobby == g_joinLobby && entered->m_EChatRoomEnterResponse == k_EChatRoomEnterResponseSuccess)
+                    SteamMatchmaking()->RequestLobbyData(CSteamID(lobby));
+                else if (lobby == g_joinLobby) {
+                    std::fprintf(stderr, "[steam] failed to enter lobby %016llX (response %d)\n",
+                                 (unsigned long long)lobby, int(entered->m_EChatRoomEnterResponse));
+                    g_joinLobby = 0;
+                }
             }
             else if (cb.m_iCallback == LobbyDataUpdate_t::k_iCallback)
             {
@@ -193,7 +241,7 @@ bool Start(Receiver receiver)
     tried = true;
     const uint32_t appId = net::ParseSteamAppId(std::getenv("TTT2_STEAM_APP_ID"));
     if (!appId) {
-        std::fprintf(stderr, "[steam] disabled: configure an authorized TTT2_STEAM_APP_ID (Spacewar is rejected)\n");
+        std::fprintf(stderr, "[steam] disabled: configure TTT2_STEAM_APP_ID (launcher uses Spacewar AppID 480)\n");
         return false;
     }
     if (!LoadLibraryW(L"steam_api64.dll"))
@@ -263,6 +311,7 @@ void RemoveLobby(uint64_t sessionId)
     if (it == g_hosted.end()) return;
     if (it->second.lobby) { SteamMatchmaking()->LeaveLobby(CSteamID(it->second.lobby)); g_hosted.erase(it); }
     else it->second.removed = true;                       // leave once the creation completes
+    if (g_hosted.empty()) SteamFriends()->ClearRichPresence();
 }
 
 std::vector<std::vector<uint8_t>> ListLobbies(int max, int timeoutMs)
@@ -294,6 +343,23 @@ bool TakeJoinRequest(std::vector<uint8_t>& record)
     return true;
 }
 
+bool OpenInviteDialog(uint64_t sessionId)
+{
+    if (!g_running || !sessionId) return false;
+    std::lock_guard l(g_mutex);
+    const auto it = g_hosted.find(sessionId);
+    if (it == g_hosted.end() || !it->second.lobby) return false;
+    SteamFriends()->ActivateGameOverlayInviteDialog(CSteamID(it->second.lobby));
+    return true;
+}
+
+bool QueueJoinLobby(uint64_t lobbyId)
+{
+    if (!g_running || !lobbyId) return false;
+    RequestLobbyJoin(lobbyId);
+    return true;
+}
+
 } // namespace steamnet::direct
 
 #else  // no Steamworks SDK in this build
@@ -307,6 +373,8 @@ void PublishLobby(uint64_t, const std::vector<uint8_t>&) {}
 void RemoveLobby(uint64_t) {}
 std::vector<std::vector<uint8_t>> ListLobbies(int, int) { return {}; }
 bool TakeJoinRequest(std::vector<uint8_t>&) { return false; }
+bool OpenInviteDialog(uint64_t) { return false; }
+bool QueueJoinLobby(uint64_t) { return false; }
 } // namespace steamnet::direct
 
 #endif

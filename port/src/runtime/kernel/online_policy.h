@@ -2,7 +2,8 @@
 #include <cstdint>
 
 namespace net {
-// Explicit decimal AppID only. This does not establish ownership or licensing rights.
+// Explicit decimal AppID only. AppID 480 is Valve's SpaceWar API example app and is
+// intentionally supported for the community's opt-in Steam transport.
 inline uint32_t ParseSteamAppId(const char* text)
 {
     if (!text || !*text) return 0;
@@ -12,6 +13,6 @@ inline uint32_t ParseSteamAppId(const char* text)
         value = value * 10 + uint32_t(*text - '0');
         if (value > UINT32_MAX) return 0;
     }
-    return value == 480 ? 0 : uint32_t(value);
+    return uint32_t(value);
 }
 }

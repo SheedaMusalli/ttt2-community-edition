@@ -236,4 +236,17 @@ bool TakeInvite(SessionRecord& out)
     return true;
 }
 
+bool OpenSteamInviteDialog()
+{
+    uint64_t sessionId = 0;
+    {
+        std::lock_guard l(g_mutex);
+        if (!g_owned.empty()) sessionId = g_owned.rbegin()->first;
+    }
+    if (!Steam() || !sessionId) return false;
+    const bool opened = steamnet::OpenInviteDialog(sessionId);
+    if (!opened) std::fprintf(stderr, "[mm] Steam invite overlay unavailable; wait for the hosted Player Match lobby to publish, then retry\n");
+    return opened;
+}
+
 } // namespace mm

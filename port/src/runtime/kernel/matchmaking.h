@@ -31,5 +31,6 @@ std::vector<SessionRecord> List(uint32_t max);
 bool Find(uint64_t id, SessionRecord& out);       // also sessions seen in a list or an invite
 // A friend's "Join Game" through Steam, once: the session to join (then findable by id).
 bool TakeInvite(SessionRecord& out);
+bool OpenSteamInviteDialog();
 
 } // namespace mm
